@@ -1,0 +1,16 @@
+// math_utils.cly — a local library, written entirely in Calyre.
+// Any top-level func/struct/let whose name does NOT start with "_" is
+// exported automatically when another file does `use math_utils`.
+
+func square(x: float) -> float
+    return x * x
+end
+
+func cube(x: float) -> float
+    return x * x * x
+end
+
+// starts with "_" -> private, not visible to whoever imports this module
+func _internal_helper() -> int
+    return 0
+end

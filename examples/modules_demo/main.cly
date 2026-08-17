@@ -1,0 +1,43 @@
+// main.cly — modules, maps, string interpolation, try/catch, assert.
+
+use math_utils
+use math
+use text
+
+struct Player
+    name: str
+    score: int
+end
+
+func describe(p: Player) -> str
+    return "{p.name} has {p.score} points"
+end
+
+func main()
+    print(describe(Player(name: "Alice", score: 42)))
+    print("square(6) = {math_utils.square(6.0)}")
+    print("sqrt(81) = {math.sqrt(81.0)}")
+    print(text.upper("calyre is readable"))
+
+    let inventory = {
+        "sword": 1,
+        "shield": 1,
+        "potion": 5
+    }
+    inventory["potion"] = inventory["potion"] + 1
+    for item in inventory
+        print("- {item}: {inventory[item]}")
+    end
+
+    try
+        let unused = 10 / 0
+    catch e
+        print("recovered from: {e.message}")
+    end
+
+    let total = inventory["sword"] + inventory["shield"] + inventory["potion"]
+    assert total > 0
+    print("done")
+end
+
+main()

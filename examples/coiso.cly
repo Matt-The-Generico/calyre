@@ -1,0 +1,505 @@
+// ============================================================
+// CALYRE PHASE 3 — FULL FEATURE TEST
+// ============================================================
+
+print("========================================")
+print("       CALYRE PHASE 3 TEST SUITE")
+print("========================================")
+print("")
+
+// ------------------------------------------------------------
+// 1. BASIC TYPES + TYPE INFERENCE
+// ------------------------------------------------------------
+
+print("[1] Basic types")
+
+let integer = 42
+let decimal = 3.14
+let text = "Hello"
+let flag = true
+
+print("int =", integer)
+print("float =", decimal)
+print("str =", text)
+print("bool =", flag)
+
+print("PASS")
+print("")
+
+
+// ------------------------------------------------------------
+// 2. STRING INTERPOLATION
+// ------------------------------------------------------------
+
+print("[2] String interpolation")
+
+let name = "Calyre"
+let number = 21
+
+print("Hello, {name}!")
+print("{number} + 1 = {number + 1}")
+
+print("PASS")
+print("")
+
+
+// ------------------------------------------------------------
+// 3. LISTS
+// ------------------------------------------------------------
+
+print("[3] Lists")
+
+let numbers = [1, 2, 3, 4, 5]
+
+print("length =", len(numbers))
+print("first =", numbers[0])
+print("last =", numbers[4])
+
+numbers[0] = 100
+
+print("changed first =", numbers[0])
+
+print("PASS")
+print("")
+
+
+// ------------------------------------------------------------
+// 4. MAPS
+// ------------------------------------------------------------
+
+print("[4] Maps")
+
+let scores = {
+    "Alice": 95,
+    "Bob": 82,
+    "Charlie": 73
+}
+
+print("Alice =", scores["Alice"])
+print("Bob =", scores["Bob"])
+
+scores["Dave"] = 88
+
+print("Dave =", scores["Dave"])
+
+for person in scores
+    print(person, "->", scores[person])
+end
+
+print("PASS")
+print("")
+
+
+// ------------------------------------------------------------
+// 5. STRUCTS
+// ------------------------------------------------------------
+
+print("[5] Structs")
+
+struct Person
+    name: str
+    age: int
+end
+
+let person = Person(
+    name: "Alice",
+    age: 20
+)
+
+print("name =", person.name)
+print("age =", person.age)
+
+print("PASS")
+print("")
+
+
+// ------------------------------------------------------------
+// 6. FUNCTIONS + RETURN TYPES
+// ------------------------------------------------------------
+
+print("[6] Functions")
+
+func add(a: int, b: int) -> int
+    return a + b
+end
+
+func greet(name: str) -> str
+    return "Hello, {name}!"
+end
+
+print("add =", add(10, 20))
+print(greet("Calyre"))
+
+print("PASS")
+print("")
+
+
+// ------------------------------------------------------------
+// 7. IF / ELIF / ELSE
+// ------------------------------------------------------------
+
+print("[7] Conditionals")
+
+let temperature = 28.0
+
+if temperature < 0.0
+    print("freezing")
+elif temperature < 15.0
+    print("cold")
+elif temperature < 25.0
+    print("mild")
+else
+    print("hot")
+end
+
+print("PASS")
+print("")
+
+
+// ------------------------------------------------------------
+// 8. WHILE + BREAK + CONTINUE
+// ------------------------------------------------------------
+
+print("[8] Loops")
+
+let i = 0
+let total = 0
+
+while i < 10
+    i = i + 1
+
+    if i == 3
+        continue
+    end
+
+    if i == 8
+        break
+    end
+
+    total = total + i
+end
+
+print("i =", i)
+print("total =", total)
+
+print("PASS")
+print("")
+
+
+// ------------------------------------------------------------
+// 9. FOR + RANGE
+// ------------------------------------------------------------
+
+print("[9] Range")
+
+let sum = 0
+
+for n in range(1, 6)
+    sum = sum + n
+end
+
+print("1..5 sum =", sum)
+
+print("PASS")
+print("")
+
+
+// ------------------------------------------------------------
+// 10. MATCH / CASE
+// ------------------------------------------------------------
+
+print("[10] Match")
+
+let day = 5
+
+match day
+    case 1
+        print("Monday")
+    case 2
+        print("Tuesday")
+    case 3
+        print("Wednesday")
+    case 4
+        print("Thursday")
+    case 5
+        print("Friday")
+    case _
+        print("Other")
+end
+
+print("PASS")
+print("")
+
+
+// ------------------------------------------------------------
+// 11. MATH STANDARD LIBRARY
+// ------------------------------------------------------------
+
+print("[11] math")
+
+use math
+
+print("sqrt =", math.sqrt(25.0))
+print("floor =", math.floor(3.9))
+print("ceil =", math.ceil(3.1))
+print("abs =", math.abs(-42))
+print("pow =", math.pow(2.0, 3.0))
+print("pi =", math.pi)
+
+print("PASS")
+print("")
+
+
+// ------------------------------------------------------------
+// 12. RANDOM
+// ------------------------------------------------------------
+
+print("[12] random")
+
+use random
+
+let random_number = random.int(1, 100)
+let random_float = random.float(0.0, 1.0)
+
+print("random int =", random_number)
+print("random float =", random_float)
+
+print("PASS")
+print("")
+
+
+// ------------------------------------------------------------
+// 13. TEXT STANDARD LIBRARY
+// ------------------------------------------------------------
+
+print("[13] text")
+
+use text
+
+let message = "  Hello Calyre!  "
+
+print("upper =", text.upper(message))
+print("lower =", text.lower(message))
+print("trim =", text.trim(message))
+print("contains =", text.contains(message, "Calyre"))
+print("starts_with =", text.starts_with(text.trim(message), "Hello"))
+print("ends_with =", text.ends_with(text.trim(message), "!"))
+print("replace =", text.replace(message, "Calyre", "World"))
+print("repeat =", text.repeat("ha", 3))
+
+print("PASS")
+print("")
+
+
+// ------------------------------------------------------------
+// 14. TIME
+// ------------------------------------------------------------
+
+print("[14] time")
+
+use time
+
+let before = time.now()
+
+print("timestamp =", before)
+
+time.sleep(0.1)
+
+let after = time.now()
+
+print("timestamp after sleep =", after)
+
+print("PASS")
+print("")
+
+
+// ------------------------------------------------------------
+// 15. ERROR HANDLING
+// ------------------------------------------------------------
+
+print("[15] try/catch")
+
+try
+    error("This is an intentional test error")
+catch e
+    print("caught:", e.message)
+end
+
+print("Program continued after error.")
+
+print("PASS")
+print("")
+
+
+// ------------------------------------------------------------
+// 16. RUNTIME ERROR
+// ------------------------------------------------------------
+
+print("[16] Runtime error handling")
+
+try
+    let a = 10
+    let b = 0
+    let result = a / b
+    print(result)
+catch e
+    print("caught runtime error:", e.message)
+end
+
+print("Program survived division by zero.")
+
+print("PASS")
+print("")
+
+
+// ------------------------------------------------------------
+// 17. ASSERT
+// ------------------------------------------------------------
+
+print("[17] assert")
+
+let expected = 10
+let actual = 10
+
+assert actual == expected
+
+print("Successful assertion passed.")
+
+try
+    assert actual > 100
+catch e
+    print("caught failed assertion:")
+    print(e.message)
+end
+
+print("PASS")
+print("")
+
+
+// ------------------------------------------------------------
+// 18. OPTIONAL VALUES / NONE
+// ------------------------------------------------------------
+
+print("[18] Optional values")
+
+func find_name(found: bool) -> str?
+    if found
+        return "Alice"
+    end
+
+    return none
+end
+
+let found_name = find_name(true)
+let missing_name = find_name(false)
+
+print("found =", found_name)
+
+if missing_name == none
+    print("missing value is none")
+else
+    print("unexpected value:", missing_name)
+end
+
+print("PASS")
+print("")
+
+
+// ------------------------------------------------------------
+// 19. PYTHON BRIDGE
+// ------------------------------------------------------------
+
+print("[19] Python bridge")
+
+use python
+
+let root = python.call("math", "sqrt", 81.0)
+
+print("Python sqrt =", root)
+
+let average = python.call(
+    "statistics",
+    "mean",
+    [10.0, 20.0, 30.0]
+)
+
+print("Python mean =", average)
+
+print("PASS")
+print("")
+
+
+// ------------------------------------------------------------
+// 20. BLOCKED PYTHON MODULE
+// ------------------------------------------------------------
+
+print("[20] Python security")
+
+try
+    python.call("os", "system", "echo BAD")
+catch e
+    print("blocked correctly:")
+    print(e.message)
+end
+
+print("PASS")
+print("")
+
+
+// ------------------------------------------------------------
+// 21. FILESYSTEM
+// ------------------------------------------------------------
+
+print("[21] Filesystem")
+
+use fs
+
+let test_file = "calyre_phase3_test.txt"
+
+fs.write(
+    test_file,
+    "Hello from Calyre!"
+)
+
+print("exists =", fs.exists(test_file))
+print("contents =", fs.read(test_file))
+
+print("PASS")
+print("")
+
+
+// ------------------------------------------------------------
+// 22. NESTED DATA
+// ------------------------------------------------------------
+
+print("[22] Nested data")
+
+let users = {
+    "Alice": {
+        "age": 20,
+        "score": 95
+    },
+    "Bob": {
+        "age": 17,
+        "score": 82
+    }
+}
+
+print("Alice age =", users["Alice"]["age"])
+print("Bob score =", users["Bob"]["score"])
+
+print("PASS")
+print("")
+
+
+// ------------------------------------------------------------
+// FINAL
+// ------------------------------------------------------------
+
+print("========================================")
+print("        ALL TESTS REACHED THE END")
+print("========================================")
+print("")
+
+print("If you saw PASS for every section,")
+print("the Phase 3 core features are working.")

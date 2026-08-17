@@ -1,0 +1,78 @@
+// demo.cly — exercita funções, structs, if/elif/else, while, for, match,
+// listas, break/continue e as funções embutidas (print, str, len, range).
+
+struct Reading
+    city: str
+    celsius: float
+end
+
+func to_fahrenheit(celsius: float) -> float
+    return celsius * 9.0 / 5.0 + 32.0
+end
+
+func classify(celsius: float) -> str
+    if celsius < 0.0
+        return "freezing"
+    elif celsius < 15.0
+        return "cold"
+    elif celsius < 25.0
+        return "mild"
+    else
+        return "hot"
+    end
+end
+
+func main()
+    let readings = [
+        Reading(city: "Fortaleza", celsius: 30.0),
+        Reading(city: "Reykjavik", celsius: -2.0),
+        Reading(city: "Lisboa", celsius: 18.5)
+    ]
+
+    for r in readings
+        let f = to_fahrenheit(r.celsius)
+        print(r.city + ": " + str(f) + "F (" + classify(r.celsius) + ")")
+    end
+
+    print("---")
+
+    // while + break/continue
+    let n = 0
+    while true
+        n = n + 1
+        if n == 3
+            continue
+        end
+        if n > 5
+            break
+        end
+        print("n =", n)
+    end
+
+    print("---")
+
+    // match / case
+    let day = 3
+    match day
+        case 1
+            print("segunda")
+        case 2
+            print("terça")
+        case 3
+            print("quarta")
+        case _
+            print("outro dia")
+    end
+
+    print("---")
+
+    // listas e range()
+    let total = 0
+    for i in range(1, 6)
+        total = total + i
+    end
+    print("soma de 1 a 5 =", total)
+    print("tamanho da lista de leituras =", len(readings))
+end
+
+main()
