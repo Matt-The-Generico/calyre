@@ -1,94 +1,188 @@
-# Calyre — implementação de referência (Fase 3)
+# Calyre
 
-Interpretador de referência da linguagem Calyre, descrito em
-`calyre-fase1-fundamentos.md`, `calyre-fase2-sintaxe-e-tipos.md` e
-`calyre-fase3-linguagem-real.md`.
-
-## Estrutura
-
-```
-calyre_entry.py         ponto de entrada (usado por 'python' e pelo build do PyInstaller)
-calyre/
-  lexer.py               texto-fonte -> tokens (agora com mapas e interpolação de string)
-  ast_nodes.py            nós da árvore sintática
-  calyre_parser.py        tokens -> AST
-  types.py                representação de tipos estáticos
-  typechecker.py          checagem de tipos em tempo de compilação
-  interpreter.py          executa a AST (ambiente, funções, structs, módulos, try/catch, assert)
-  stdlib.py               biblioteca padrão: math, random, time, text, fs, python (interop)
-  repl.py                 REPL interativo (mesmo lexer/parser/checker/interpretador)
-  cli.py                  comando `calyre` (run/check/init/repl/add/remove/list/version)
-examples/
-  hello.cly                "Olá, mundo"
-  demo.cly                  gramática do núcleo (Fase 2)
-  modules_demo/             módulos locais, mapas, interpolação, try/catch, assert (Fase 3)
-tests/                    76 testes (unittest) — lexer, parser, type checker, interpretador, módulos, stdlib
-dist/
-  calyre                    executável único, gerado via PyInstaller (Linux x86_64)
+```text                          
+                    .%%.                    
+                    =%%+                    
+              -%#:  .%%.  :*%-              
+              -%%%%+ %% =%%%%-              
+                 :=%%##%%=:                 
+                 :=%%##%%=:                 
+              -%%%%+ %% =%%%%-              
+              -%#:  .%%.  :*%-              
+                    +%%+                    
+                    .%%.                    
 ```
 
-Nenhuma dependência externa é necessária para *rodar* a linguagem — apenas
-Python 3.11+ padrão (`tomllib` é usado para ler `calyre.toml`). PyInstaller é
-usado somente para *empacotar* em um único binário, para que o usuário final
-não precise ter Python instalado.
+**Calyre** is a programming language designed to be simple, expressive, and easy to experiment with.
 
-## Rodando com Python (desenvolvimento)
+This repository contains the reference implementation of Calyre.
+
+## Features
+
+* Simple, readable syntax
+* Variables and expressions
+* Functions
+* Conditional statements
+* Loops
+* Basic data types
+* Explicit type conversion
+* Built-in functions
+* `.cly` source files
+* Command-line interpreter
+* No external dependencies required to run the interpreter
+
+## Example
+
+```cly
+let name = "World"
+
+print("Hello, " + name + "!")
+```
+
+A slightly larger example:
+
+```cly
+let name = "Calyre"
+let version = 3
+
+print("Welcome to " + name)
+print("Version: " + str(version))
+
+if version >= 3 {
+    print("This is a modern version of Calyre.")
+} else {
+    print("This is an older version of Calyre.")
+}
+```
+
+## Installation
+
+Calyre currently only requires **Python 3**.
+
+### Prebuilt Binary
+
+The easiest way to use Calyre on Windows is to download the latest release from the [Releases](https://github.com/Matt-The-Generico/calyre/releases) page.
+
+Download `calyre.exe` and add its location to your system `PATH` if you want to run Calyre from anywhere.
+
+You can then use:
+
+```powershell
+calyre
+
+calyre version
+
+## Usage
+
+Run a Calyre program:
 
 ```bash
-python3 calyre_entry.py run examples/hello.cly
-python3 calyre_entry.py run examples/demo.cly
-python3 calyre_entry.py run examples/modules_demo/main.cly
-python3 calyre_entry.py check examples/demo.cly   # type-checa sem rodar
-python3 calyre_entry.py                            # abre o REPL
-python3 calyre_entry.py init meu_projeto            # cria main.cly + calyre.toml
-python3 calyre_entry.py version
+calyre run program.cly
 ```
 
-## Rodando os testes
+Check a program without running it:
 
 ```bash
-python3 -m unittest discover -s tests -v
+calyre check program.cly
 ```
 
-## Rodando o binário empacotado (distribuição final)
+You can also run the interpreter directly through Python if you are working from the source repository.
 
-```bash
-./dist/calyre run examples/hello.cly
-./dist/calyre                          # REPL
+## File Extension
+
+Calyre source files use the:
+
+```text
+.cly
 ```
 
-Este binário não exige Python, Node, CMake, LLVM nem qualquer outra ferramenta
-instalada na máquina do usuário.
+extension.
 
-## Gerando o binário você mesmo (outras plataformas)
+For example:
 
-O binário incluído foi compilado em Linux x86_64. Para Windows ou macOS, rode
-o mesmo comando *naquela* plataforma (PyInstaller não faz cross-compiling):
-
-```bash
-pip install pyinstaller
-python -m PyInstaller --onefile --name calyre calyre_entry.py
+```text
+hello.cly
+calculator.cly
+game.cly
 ```
 
-## O que já funciona (Fase 3)
+## Types
 
-Tudo da Fase 2, mais:
+Calyre supports several basic types, including:
 
-- **Checagem estática de tipos**, antes de rodar (`calyre run`/`check`).
-- **Módulos locais** (`use nome`, `use nome as apelido`) — qualquer arquivo
-  `.cly` do projeto vira uma biblioteca importável.
-- **Biblioteca padrão**: `math`, `random`, `time`, `text`, `fs`.
-- **Ponte com Python**, restrita a uma lista segura de módulos
-  (`use python` + `python.call(...)`).
-- **Mapas** (`{ "a": 1 }`), **interpolação de string** (`"Hi, {name}"`),
-  **`try/catch`**, **`error(...)`**, **`assert`** (com mensagem
-  auto-explicativa quando falha).
-- **REPL** (`calyre` sem argumentos), com multilinha automática e estado
-  persistente.
-- **`calyre.toml`** + `calyre init/add/remove/list` para dependências
-  **locais** (sem registro remoto — ver Fase 3, seção 5, para o motivo).
+```text
+int
+float
+string
+bool
+```
 
-Pendências explícitas (não implementadas, com justificativa em
-`calyre-fase3-linguagem-real.md`): checagem de tipo *entre* módulos,
-`trait`/interfaces, generics em declarações próprias, `calyre fmt`,
-registro remoto de pacotes, módulos `json`/`system`/`path`/`http`.
+Calyre does not automatically convert integers and floating-point numbers between each other.
+
+For example, explicit conversion can be used when necessary:
+
+```cly
+let x = 10
+let y = float(x)
+```
+
+or:
+
+```cly
+let x = 10.5
+let y = int(x)
+```
+
+This keeps type conversions explicit and predictable.
+
+## Testing
+
+The project includes tests for the interpreter and language features.
+
+Run the test suite from the project directory using the project's configured test command.
+
+## Philosophy
+
+Calyre is intended to be a language that is:
+
+**Readable.**
+Code should be understandable without requiring excessive syntax.
+
+**Predictable.**
+Language behavior should be explicit rather than relying heavily on implicit conversions or surprising rules.
+
+**Experimental.**
+Calyre is also a project for exploring programming-language design and interpreter implementation.
+
+## Status
+
+Calyre is currently under active development.
+
+The reference implementation is functional, but the language specification and implementation may continue to evolve.
+
+Syntax and behavior may change between versions.
+
+## Contributing
+
+Contributions, bug reports, suggestions, and experiments are welcome.
+
+If you find a bug, please open an issue describing:
+
+1. What you expected to happen
+2. What actually happened
+3. The Calyre code that reproduces the problem
+4. Any relevant error messages
+
+For larger changes, opening an issue first is recommended so the proposed change can be discussed.
+
+## License
+
+See the repository's license information for the terms under which Calyre may be used, modified, and distributed.
+
+---
+
+Made by uchoa
+
+**Calyre**
+
+*make stuff now.*
