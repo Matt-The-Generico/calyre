@@ -61,7 +61,7 @@ Calyre currently only requires **Python 3**.
 
 ### Prebuilt Binary
 
-The easiest way to use Calyre on Windows is to download the latest release from the [Releases](https://github.com/Matt-The-Generico/calyre/releases) page.
+The easiest way to use Calyre on Windows and Linux is to download the latest release from the [Releases](https://github.com/Matt-The-Generico/calyre/releases) page.
 
 Download `calyre.exe` and add its location to your system `PATH` if you want to run Calyre from anywhere.
 
