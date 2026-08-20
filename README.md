@@ -1,17 +1,6 @@
 # Calyre
 
-```text                          
-                    .%%.                    
-                    =%%+                    
-              -%#:  .%%.  :*%-              
-              -%%%%+ %% =%%%%-              
-                 :=%%##%%=:                 
-                 :=%%##%%=:                 
-              -%%%%+ %% =%%%%-              
-              -%#:  .%%.  :*%-              
-                    +%%+                    
-                    .%%.                    
-```
+![image]([https://ibb.co/twMf1Kc9])
 
 **Calyre** is a programming language designed to be simple, expressive, and easy to experiment with.
 
