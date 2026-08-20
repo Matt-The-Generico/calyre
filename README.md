@@ -76,7 +76,6 @@ calyre version
 
 Run a Calyre program:
 
-```bash
 calyre run program.cly
 ```
 
