@@ -1,6 +1,6 @@
 # Calyre
 
-![image]([https://ibb.co/twMf1Kc9])
+![Calyre logo](./assets/calyre-logo.png)
 
 **Calyre** is a programming language designed to be simple, expressive, and easy to experiment with.
 
@@ -60,11 +60,13 @@ You can then use:
 calyre
 
 calyre version
+```
 
 ## Usage
 
 Run a Calyre program:
 
+```powershell
 calyre run program.cly
 ```
 
