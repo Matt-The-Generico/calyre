@@ -1,13 +1,15 @@
 """
 Calyre tree-walking interpreter.
 
-This is the *reference* execution engine for the language core described in
-"Calyre — Fase 2: Sintaxe, Gramática e Tipos". It is intentionally a
+This is the *reference* execution engine for the language core. It is intentionally a
 tree-walking interpreter, not a compiler: the goal of this phase is a
 correct, readable implementation of the full core grammar. Types are
-enforced at *runtime* here — full static (compile-time) type-checking is
+enforced at *runtime* here, full static (compile-time) type-checking is
 scoped for a later phase, and the language design already assumes it.
 """
+
+import inspect
+import sys
 
 from . import ast_nodes as A
 
@@ -17,14 +19,20 @@ class CalyreRuntimeError(Exception):
 
     def __init__(self, message, line=None):
         loc = f"[linha {line}] " if line is not None else ""
-        super().__init__(f"{loc}Erro em tempo de execução: {message}")
+        super().__init__(f"{loc}runtime error: {message}")
         self.line = line
         self.message = message
+        self.file = None          # filled in as the error leaves the file where it happened
 
 
 class CalyreUserError(CalyreRuntimeError):
-    """Raised by the builtin `error(message)` — a deliberate, catchable failure."""
+    """Raised by the builtin `error(message)`, a deliberate, catchable failure."""
     pass
+
+
+MAX_CALL_DEPTH = 800
+# Each Calyre call uses several Python frames in this tree-walking interpreter.
+sys.setrecursionlimit(max(sys.getrecursionlimit(), 12000))
 
 
 class _ReturnSignal(Exception):
@@ -58,7 +66,7 @@ class Environment:
             if name in env.vars:
                 return env.vars[name]
             env = env.parent
-        raise CalyreRuntimeError(f"nome '{name}' não foi definido", line)
+        raise CalyreRuntimeError(f"'{name}' is not defined", line)
 
     def set(self, name, value, line=None):
         env = self
@@ -68,7 +76,7 @@ class Environment:
                 return
             env = env.parent
         raise CalyreRuntimeError(
-            f"não é possível atribuir a '{name}' antes de declará-lo com 'let'", line
+            f"cannot assign to '{name}' before declaring it with 'let'", line
         )
 
 
@@ -88,7 +96,7 @@ class StructType:
         extra = [k for k in kwargs if k not in self.field_names]
         if extra:
             raise CalyreRuntimeError(
-                f"'{self.name}' não possui os campos: {', '.join(extra)}"
+                f"'{self.name}' has no field(s): {', '.join(extra)}"
             )
         return StructInstance(self.name, dict(kwargs))
 
@@ -126,15 +134,16 @@ class Module:
 
 
 class CalyreFunction:
-    def __init__(self, decl: A.FuncDecl, closure: Environment):
+    def __init__(self, decl: A.FuncDecl, closure: Environment, file=None):
         self.decl = decl
         self.closure = closure
+        self.file = file
 
     @property
     def name(self):
         return self.decl.name
 
-    def call(self, interpreter, args):
+    def call(self, interpreter, args, line=None):
         env = Environment(self.closure)
         params = self.decl.params
         if len(args) != len(params):
@@ -144,10 +153,29 @@ class CalyreFunction:
             )
         for param, value in zip(params, args):
             env.define(param.name, value)
+        interpreter.call_depth += 1
+        if interpreter.call_depth > MAX_CALL_DEPTH:
+            interpreter.call_depth = 0
+            raise CalyreRuntimeError(
+                f"maximum call depth ({MAX_CALL_DEPTH}) exceeded in '{self.name}' : "
+                f"a function probably calls itself without ever stopping",
+                self.decl.line,
+            )
         try:
             interpreter.exec_block(self.decl.body, env)
         except _ReturnSignal as r:
             return r.value
+        except (_BreakSignal, _ContinueSignal):
+            raise CalyreRuntimeError(
+                f"'break'/'continue' used outside of a loop in '{self.name}'", self.decl.line
+            )
+        except CalyreRuntimeError as e:
+            if e.file is None:
+                e.file = self.file       # blame the file that defines the function
+            raise
+        finally:
+            if interpreter.call_depth > 0:
+                interpreter.call_depth -= 1
         return None
 
     def __repr__(self):
@@ -159,8 +187,25 @@ class BuiltinFunction:
         self.name = name
         self.fn = fn
 
-    def call(self, interpreter, args):
-        return self.fn(*args)
+    def call(self, interpreter, args, line=None):
+        try:
+            sig = inspect.signature(self.fn)
+            sig.bind(*args)
+        except TypeError as e:
+            raise CalyreRuntimeError(
+                f"'{self.name}' was called with the wrong number of arguments ({len(args)} given)",
+                line,
+            ) from e
+        except ValueError:
+            pass  # signature not introspectable (some C builtins): let the call decide
+        try:
+            return self.fn(*args)
+        except CalyreRuntimeError:
+            raise
+        except (TypeError, AttributeError, ValueError, OverflowError) as e:
+            raise CalyreRuntimeError(
+                f"'{self.name}' cannot be used with these argument types: {e}", line
+            ) from e
 
     def __repr__(self):
         return f"<builtin {self.name}>"
@@ -197,12 +242,12 @@ def _builtin_str(value):
 
 def _builtin_int(value):
     if isinstance(value, bool):
-        raise CalyreRuntimeError("não é possível converter bool para int diretamente")
+        raise CalyreRuntimeError("cannot convert a bool to an int directly")
     if isinstance(value, str):
         try:
             return int(value)
         except ValueError as e:
-            raise CalyreRuntimeError(f"'{value}' não é um int válido") from e
+            raise CalyreRuntimeError(f"'{value}' is not a valid int") from e
     return int(value)
 
 
@@ -211,14 +256,14 @@ def _builtin_float(value):
         try:
             return float(value)
         except ValueError as e:
-            raise CalyreRuntimeError(f"'{value}' não é um float válido") from e
+            raise CalyreRuntimeError(f"'{value}' is not a valid float") from e
     return float(value)
 
 
 def _builtin_len(value):
     if isinstance(value, (list, str, dict)):
         return len(value)
-    raise CalyreRuntimeError("'len' espera uma lista, um mapa ou um texto")
+    raise CalyreRuntimeError("'len' expects a list, a map or a text")
 
 
 def _builtin_range(*args):
@@ -228,7 +273,7 @@ def _builtin_range(*args):
         return list(range(args[0], args[1]))
     if len(args) == 3:
         return list(range(args[0], args[1], args[2]))
-    raise CalyreRuntimeError("'range' aceita de 1 a 3 argumentos")
+    raise CalyreRuntimeError("'range' takes 1 to 3 arguments")
 
 
 def _builtin_input(prompt=""):
@@ -236,7 +281,7 @@ def _builtin_input(prompt=""):
         return input(calyre_repr(prompt) if not isinstance(prompt, str) else prompt)
     except EOFError as e:
         raise CalyreRuntimeError(
-            "'input' não conseguiu ler nenhuma entrada (fim do stream)"
+            "'input' could not read anything (end of input)"
         ) from e
 
 
@@ -246,7 +291,7 @@ def _builtin_input_int(prompt=""):
         return int(raw.strip())
     except ValueError as e:
         raise CalyreRuntimeError(
-            f"'{raw}' não é um int válido — digite apenas números inteiros"
+            f"'{raw}' is not a valid int - type a whole number"
         ) from e
 
 
@@ -256,7 +301,7 @@ def _builtin_input_float(prompt=""):
         return float(raw.strip())
     except ValueError as e:
         raise CalyreRuntimeError(
-            f"'{raw}' não é um float válido — digite um número, ex: 3.14"
+            f"'{raw}' is not a valid float - type a number, e.g. 3.14"
         ) from e
 
 
@@ -267,7 +312,7 @@ def _builtin_input_bool(prompt=""):
     if raw in ("false", "no", "n", "0"):
         return False
     raise CalyreRuntimeError(
-        f"'{raw}' não é um bool válido — responda com true/false, yes/no ou y/n"
+        f"'{raw}' is not a valid bool - answer true/false, yes/no or y/n"
     )
 
 
@@ -291,7 +336,7 @@ BUILTINS = {
 
 
 class Interpreter:
-    def __init__(self, base_dir=None, module_cache=None, loading_stack=None):
+    def __init__(self, base_dir=None, module_cache=None, loading_stack=None, file=None):
         self.globals = Environment()
         for name, fn in BUILTINS.items():
             self.globals.define(name, fn)
@@ -303,11 +348,24 @@ class Interpreter:
         self.base_dir = base_dir or os.getcwd()
         self.module_cache = module_cache if module_cache is not None else {}
         self.loading_stack = loading_stack if loading_stack is not None else []
+        self.call_depth = 0
+        self.file = file
+        self._exec_cache = {}     # node class -> bound method (dispatch cache)
+        self._eval_cache = {}
 
     # ---- entry point ----
 
     def run(self, program: A.Program):
-        self.exec_block(program.statements, self.globals)
+        try:
+            self.exec_block(program.statements, self.globals)
+        except _ReturnSignal:
+            raise CalyreRuntimeError("'return' used outside of a function")
+        except (_BreakSignal, _ContinueSignal):
+            raise CalyreRuntimeError("'break'/'continue' used outside of a loop")
+        except CalyreRuntimeError as e:
+            if e.file is None:
+                e.file = self.file
+            raise
 
     # ---- statement execution ----
 
@@ -316,9 +374,13 @@ class Interpreter:
             self.exec_stmt(stmt, env)
 
     def exec_stmt(self, stmt, env):
-        method = getattr(self, f"exec_{type(stmt).__name__}", None)
+        cls = type(stmt)
+        method = self._exec_cache.get(cls)
         if method is None:
-            raise CalyreRuntimeError(f"instrução não suportada: {type(stmt).__name__}")
+            method = getattr(self, f"exec_{cls.__name__}", None)
+            if method is None:
+                raise CalyreRuntimeError(f"unsupported statement: {cls.__name__}")
+            self._exec_cache[cls] = method
         method(stmt, env)
 
     def exec_LetStmt(self, stmt: A.LetStmt, env):
@@ -326,7 +388,7 @@ class Interpreter:
         env.define(stmt.name, value)
 
     def exec_FuncDecl(self, stmt: A.FuncDecl, env):
-        env.define(stmt.name, CalyreFunction(stmt, env))
+        env.define(stmt.name, CalyreFunction(stmt, env, self.file))
 
     def exec_StructDecl(self, stmt: A.StructDecl, env):
         env.define(stmt.name, StructType(stmt.name, stmt.fields))
@@ -354,7 +416,7 @@ class Interpreter:
             iterable = list(iterable.keys())  # `for k in a_map` iterates over keys
         if not isinstance(iterable, (list, str)):
             raise CalyreRuntimeError(
-                "'for ... in' espera uma lista, um mapa, um texto, ou 'range(...)'", stmt.line
+                "'for ... in' expects a list, a map, a text or range(...)", stmt.line
             )
         for item in iterable:
             loop_env = Environment(env)
@@ -402,21 +464,23 @@ class Interpreter:
     def _load_local_module(self, path, line):
         import os
 
-        file_path = os.path.join(self.base_dir, *path.split(".")) + ".cly"
-        file_path = os.path.normpath(file_path)
+        from . import resolver
+        file_path = resolver.resolve(path, self.base_dir)
+        if file_path is None:
+            raise CalyreRuntimeError(f"'use {path}': cannot find the module", line)
 
         if file_path in self.module_cache:
             return self.module_cache[file_path]
 
         if file_path in self.loading_stack:
             cycle = " -> ".join(self.loading_stack + [file_path])
-            raise CalyreRuntimeError(f"importação circular detectada: {cycle}", line)
+            raise CalyreRuntimeError(f"circular import detected: {cycle}", line)
 
         if not os.path.isfile(file_path):
             raise CalyreRuntimeError(
-                f"'use {path}' — não foi possível encontrar '{file_path}'. "
-                f"Módulos locais precisam de um arquivo .cly no mesmo projeto "
-                f"(bibliotecas remotas ainda não são suportadas — ver calyre.toml)",
+                f"'use {path}': cannot find '{file_path}'. "
+                f"Local modules are .cly files inside the project "
+                f"(remote libraries are not supported yet)",
                 line,
             )
 
@@ -431,13 +495,13 @@ class Interpreter:
             tokens = tokenize(source)
             program = parse(tokens)
         except (LexError, ParseError) as e:
-            raise CalyreRuntimeError(f"erro ao carregar módulo '{path}': {e}", line) from e
+            raise CalyreRuntimeError(f"cannot load module '{path}': {e}", line) from e
 
-        errors = typechecker.check(program)
+        errors = typechecker.check(program, base_dir=os.path.dirname(file_path))
         if errors:
             details = "; ".join(str(err) for err in errors)
             raise CalyreRuntimeError(
-                f"módulo '{path}' tem erro(s) de tipo: {details}", line
+                f"module '{path}' has type error(s): {details}", line
             )
 
         self.loading_stack.append(file_path)
@@ -445,6 +509,7 @@ class Interpreter:
             base_dir=os.path.dirname(file_path),
             module_cache=self.module_cache,
             loading_stack=self.loading_stack,
+            file=file_path,
         )
         try:
             module_interp.run(program)
@@ -486,9 +551,13 @@ class Interpreter:
     # ---- expression evaluation ----
 
     def eval(self, node, env):
-        method = getattr(self, f"eval_{type(node).__name__}", None)
+        cls = type(node)
+        method = self._eval_cache.get(cls)
         if method is None:
-            raise CalyreRuntimeError(f"expressão não suportada: {type(node).__name__}")
+            method = getattr(self, f"eval_{cls.__name__}", None)
+            if method is None:
+                raise CalyreRuntimeError(f"unsupported expression: {cls.__name__}")
+            self._eval_cache[cls] = method
         return method(node, env)
 
     def eval_Literal(self, node: A.Literal, env):
@@ -502,7 +571,7 @@ class Interpreter:
         for key_node, val_node in node.pairs:
             key = self.eval(key_node, env)
             if isinstance(key, (list, dict)):
-                raise CalyreRuntimeError("chaves de mapa precisam ser um valor simples (não lista/mapa)", node.line)
+                raise CalyreRuntimeError("map keys must be simple values (not a list or a map)", node.line)
             result[key] = self.eval(val_node, env)
         return result
 
@@ -525,20 +594,21 @@ class Interpreter:
         if node.op == "-":
             _check_number(value, node.line)
             return -value
-        raise CalyreRuntimeError(f"operador unário desconhecido '{node.op}'", node.line)
+        raise CalyreRuntimeError(f"unknown unary operator '{node.op}'", node.line)
 
     def eval_BinaryOp(self, node: A.BinaryOp, env):
         op = node.op
         if op == "and":
+            if not _truthy(self.eval(node.left, env)):
+                return False
+            return _truthy(self.eval(node.right, env))
+        if op == "??":
             left = self.eval(node.left, env)
-            if not _truthy(left):
-                return left
-            return self.eval(node.right, env)
+            return left if left is not None else self.eval(node.right, env)
         if op == "or":
-            left = self.eval(node.left, env)
-            if _truthy(left):
-                return left
-            return self.eval(node.right, env)
+            if _truthy(self.eval(node.left, env)):
+                return True
+            return _truthy(self.eval(node.right, env))
 
         left = self.eval(node.left, env)
         right = self.eval(node.right, env)
@@ -559,29 +629,29 @@ class Interpreter:
             return callee(**kwargs)
 
         if not (isinstance(callee, (CalyreFunction, BuiltinFunction))):
-            raise CalyreRuntimeError("tentativa de chamar algo que não é uma função", node.line)
+            raise CalyreRuntimeError("tried to call something that is not a function", node.line)
 
         args = []
         for arg in node.args:
             if arg.name is not None:
                 raise CalyreRuntimeError(
-                    "argumentos nomeados só são aceitos ao construir structs", node.line
+                    "named arguments are only accepted when building structs", node.line
                 )
             args.append(self.eval(arg.value, env))
-        return callee.call(self, args)
+        return callee.call(self, args, node.line)
 
     def eval_Get(self, node: A.Get, env):
         obj = self.eval(node.obj, env)
         if isinstance(obj, StructInstance):
             if node.name not in obj.fields:
                 raise CalyreRuntimeError(
-                    f"'{obj.type_name}' não possui o campo '{node.name}'", node.line
+                    f"'{obj.type_name}' has no field '{node.name}'", node.line
                 )
             return obj.fields[node.name]
         if isinstance(obj, Module):
             return obj.get(node.name, node.line)
         raise CalyreRuntimeError(
-            f"'.{node.name}' não pode ser usado em um valor deste tipo", node.line
+            f"'.{node.name}' cannot be used on a value of this type", node.line
         )
 
     def eval_Index(self, node: A.Index, env):
@@ -589,16 +659,16 @@ class Interpreter:
         idx = self.eval(node.index, env)
         if isinstance(obj, dict):
             if idx not in obj:
-                raise CalyreRuntimeError(f"chave {calyre_repr(idx)} não existe no mapa", node.line)
+                raise CalyreRuntimeError(f"key {calyre_repr(idx)} does not exist in the map", node.line)
             return obj[idx]
         if not isinstance(obj, (list, str)):
-            raise CalyreRuntimeError("apenas listas, mapas e textos podem ser indexados", node.line)
+            raise CalyreRuntimeError("only lists, maps and texts can be indexed", node.line)
         if not isinstance(idx, int) or isinstance(idx, bool):
-            raise CalyreRuntimeError("o índice precisa ser um int", node.line)
+            raise CalyreRuntimeError("an index must be an int", node.line)
         try:
             return obj[idx]
         except IndexError as e:
-            raise CalyreRuntimeError(f"índice {idx} fora do intervalo", node.line) from e
+            raise CalyreRuntimeError(f"index {idx} is out of range", node.line) from e
 
     def eval_Assign(self, node: A.Assign, env):
         value = self.eval(node.value, env)
@@ -609,7 +679,7 @@ class Interpreter:
         if isinstance(target, A.Get):
             obj = self.eval(target.obj, env)
             if not isinstance(obj, StructInstance):
-                raise CalyreRuntimeError("atribuição de campo em valor que não é struct", node.line)
+                raise CalyreRuntimeError("cannot assign a field on a value that is not a struct", node.line)
             obj.fields[target.name] = value
             return value
         if isinstance(target, A.Index):
@@ -619,10 +689,16 @@ class Interpreter:
                 obj[idx] = value
                 return value
             if not isinstance(obj, list):
-                raise CalyreRuntimeError("apenas listas e mapas podem ser atribuídos por índice", node.line)
+                raise CalyreRuntimeError("only lists and maps can be assigned by index", node.line)
+            if not isinstance(idx, int) or isinstance(idx, bool):
+                raise CalyreRuntimeError("an index must be an int", node.line)
+            if not -len(obj) <= idx < len(obj):
+                raise CalyreRuntimeError(
+                    f"index {idx} is out of range (the list has {len(obj)} element(s))", node.line
+                )
             obj[idx] = value
             return value
-        raise CalyreRuntimeError("alvo de atribuição inválido", node.line)
+        raise CalyreRuntimeError("invalid assignment target", node.line)
 
 
 def _truthy(value):
@@ -635,7 +711,7 @@ def _truthy(value):
 
 def _check_number(value, line):
     if isinstance(value, bool) or not isinstance(value, (int, float)):
-        raise CalyreRuntimeError("esperava um número (int ou float)", line)
+        raise CalyreRuntimeError("expected a number (int or float)", line)
 
 
 _NUMERIC_OPS = {"+", "-", "*", "/", "%", "<", ">", "<=", ">="}
@@ -646,8 +722,8 @@ def _apply_binop(op, left, right, line):
         if isinstance(left, str) or isinstance(right, str):
             if not (isinstance(left, str) and isinstance(right, str)):
                 raise CalyreRuntimeError(
-                    "não é possível somar texto com um valor que não é texto — "
-                    "use str(...) para converter primeiro",
+                    "cannot join text with a value that is not text - "
+                    "convert it first with str(...)",
                     line,
                 )
             return left + right
@@ -664,13 +740,11 @@ def _apply_binop(op, left, right, line):
             return left * right
         if op == "/":
             if right == 0:
-                raise CalyreRuntimeError("divisão por zero", line)
-            if isinstance(left, int) and isinstance(right, int):
-                return left // right if left % right == 0 else left / right
-            return left / right
+                raise CalyreRuntimeError("division by zero", line)
+            return left / right  # '/' always yields a float (value-independent type)
         if op == "%":
             if right == 0:
-                raise CalyreRuntimeError("módulo por zero", line)
+                raise CalyreRuntimeError("modulo by zero", line)
             return left % right
         if op == "<":
             return left < right
@@ -686,23 +760,23 @@ def _apply_binop(op, left, right, line):
     if op == "!=":
         return not _calyre_equals(left, right)
 
-    raise CalyreRuntimeError(f"operador desconhecido '{op}'", line)
+    raise CalyreRuntimeError(f"unknown operator '{op}'", line)
 
 
 def _check_same_numeric_type(left, right, line):
     for v in (left, right):
         if isinstance(v, bool) or not isinstance(v, (int, float)):
-            raise CalyreRuntimeError("operador numérico usado em valor que não é número", line)
+            raise CalyreRuntimeError("numeric operator used on a value that is not a number", line)
     if isinstance(left, int) and isinstance(right, float):
         raise CalyreRuntimeError(
-            "Calyre não converte int e float automaticamente — "
-            "use float(...) ou int(...) para converter explicitamente",
+            "Calyre never mixes int and float automatically - "
+            "convert explicitly with float(...) or int(...)",
             line,
         )
     if isinstance(left, float) and isinstance(right, int):
         raise CalyreRuntimeError(
-            "Calyre não converte int e float automaticamente — "
-            "use float(...) ou int(...) para converter explicitamente",
+            "Calyre never mixes int and float automatically - "
+            "convert explicitly with float(...) or int(...)",
             line,
         )
 
@@ -719,8 +793,8 @@ _COMPARISON_OPS = {"==", "!=", "<", ">", "<=", ">="}
 def _unparse(node):
     """Best-effort reconstruction of an expression's source text, used to
     make `assert` failures self-explaining without the user writing a
-    custom message. Not a full pretty-printer — just enough for common
-    expressions (see Phase 3 notes on the `assert` feature)."""
+    custom message. Not a full pretty-printer, just enough for common
+    expressions."""
     if isinstance(node, A.Literal):
         return calyre_repr(node.value) if not isinstance(node.value, str) else f'"{node.value}"'
     if isinstance(node, A.Identifier):
@@ -741,7 +815,7 @@ def _unparse(node):
 
 def _describe_failed_assert(node, env, interpreter):
     """Calyre's `assert` is self-explaining: it doesn't just say the
-    condition was false, it shows the values that made it false — an
+    condition was false, it shows the values that made it false, an
     original, small feature aimed squarely at reducing the distance
     between 'my program is wrong' and 'I know why'."""
     text = _unparse(node)
@@ -755,5 +829,5 @@ def _describe_failed_assert(node, env, interpreter):
     return text
 
 
-def interpret(program: A.Program, base_dir=None):
-    Interpreter(base_dir=base_dir).run(program)
+def interpret(program: A.Program, base_dir=None, file=None):
+    Interpreter(base_dir=base_dir, file=file).run(program)

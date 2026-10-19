@@ -109,14 +109,12 @@ end
         errs = _errors(src)
         self.assertEqual(errs, [])
 
-    def test_module_member_calls_are_lenient(self):
-        # cross-module type info isn't tracked in this phase — should not error
-        src = '''
-use math_utils
-print(math_utils.square(5.0))
-'''
+    def test_missing_module_is_a_static_error(self):
+        # Phase 3 accepted this silently; Phase 4 reports it before running.
+        src = 'use math_utils\nprint(math_utils.square(5.0))'
         errs = _errors(src)
-        self.assertEqual(errs, [])
+        self.assertEqual(len(errs), 1)
+        self.assertIn("cannot find module", errs[0].message)
 
     def test_list_type_mismatch_via_index(self):
         src = '''

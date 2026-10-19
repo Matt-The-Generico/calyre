@@ -2,7 +2,7 @@
 Calyre lexer.
 
 Converts raw source text into a flat list of Token objects.
-No external dependencies — pure Python standard library.
+No external dependencies, pure Python standard library.
 """
 from dataclasses import dataclass
 
@@ -15,6 +15,7 @@ KEYWORDS = {
 
 SYMBOLS_MULTI = [
     ("->", "ARROW"),
+    ("??", "COALESCE"),
     ("==", "EQEQ"),
     ("!=", "NOTEQ"),
     ("<=", "LTEQ"),

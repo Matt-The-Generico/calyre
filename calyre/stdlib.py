@@ -5,7 +5,7 @@ Each module is a `Module` value bound at import time (`use math`), backed
 by Python functions. This is the "category A" library described in the
 Phase 3 design notes: it ships with Calyre itself, as opposed to local
 user libraries (plain .cly files loaded via the module loader in
-interpreter.py) or external libraries (not implemented — see notes).
+interpreter.py) or external libraries (not implemented).
 
 Modules are constructed lazily and cached, so `use math` twice in the
 same program does no repeated work.
@@ -33,8 +33,13 @@ def _module(name, builder):
 def _build_math():
     def sqrt(x):
         if x < 0:
-            raise CalyreRuntimeError("math.sqrt: não é possível tirar raiz de um número negativo")
+            raise CalyreRuntimeError("math.sqrt: cannot take the square root of a negative number")
         return _math.sqrt(x)
+
+    def floor_div(a, b):
+        if b == 0:
+            raise CalyreRuntimeError("math.floor_div: division by zero")
+        return a // b
 
     members = {
         "sqrt": BuiltinFunction("math.sqrt", sqrt),
@@ -45,6 +50,7 @@ def _build_math():
         "min": BuiltinFunction("math.min", lambda a, b: min(a, b)),
         "max": BuiltinFunction("math.max", lambda a, b: max(a, b)),
         "round": BuiltinFunction("math.round", lambda x: round(x)),
+        "floor_div": BuiltinFunction("math.floor_div", floor_div),
         "pi": _math.pi,
         "e": _math.e,
     }
@@ -56,12 +62,12 @@ def _build_math():
 def _build_random():
     def rand_int(a, b):
         if a > b:
-            raise CalyreRuntimeError("random.int: o primeiro valor precisa ser <= o segundo")
+            raise CalyreRuntimeError("random.int: the first value must be <= the second")
         return _random.randint(a, b)
 
     def rand_choice(items):
         if not isinstance(items, list) or not items:
-            raise CalyreRuntimeError("random.choice: espera uma lista não vazia")
+            raise CalyreRuntimeError("random.choice: expects a non-empty list")
         return _random.choice(items)
 
     members = {
@@ -111,13 +117,13 @@ def _build_fs():
             with open(path, "r", encoding="utf-8") as f:
                 return f.read()
         except FileNotFoundError as e:
-            raise CalyreRuntimeError(f"fs.read: arquivo '{path}' não encontrado") from e
+            raise CalyreRuntimeError(f"fs.read: file '{path}' not found") from e
         except IsADirectoryError as e:
-            raise CalyreRuntimeError(f"fs.read: '{path}' é uma pasta, não um arquivo") from e
+            raise CalyreRuntimeError(f"fs.read: '{path}' is a folder, not a file") from e
 
     def write(path, content):
         if not isinstance(content, str):
-            raise CalyreRuntimeError("fs.write: o conteúdo precisa ser um texto (use str(...) se necessário)")
+            raise CalyreRuntimeError("fs.write: the content must be a text (use str(...) if needed)")
         with open(path, "w", encoding="utf-8") as f:
             f.write(content)
         return None
@@ -126,7 +132,7 @@ def _build_fs():
         try:
             return sorted(_os.listdir(path))
         except FileNotFoundError as e:
-            raise CalyreRuntimeError(f"fs.list_dir: pasta '{path}' não encontrada") from e
+            raise CalyreRuntimeError(f"fs.list_dir: folder '{path}' not found") from e
 
     def make_dir(path):
         _os.makedirs(path, exist_ok=True)
@@ -142,7 +148,7 @@ def _build_fs():
     return Module("fs", members)
 
 
-# ---- python (interoperability bridge — see Phase 3 notes for scope/limits) ----
+# ---- python (interoperability bridge) ----
 
 _PY_ALLOWED_MODULES = {"math", "random", "statistics", "datetime", "json"}
 
@@ -155,8 +161,8 @@ def _to_python(value, line=None):
     if isinstance(value, dict):
         return {k: _to_python(v, line) for k, v in value.items()}
     raise CalyreRuntimeError(
-        "python interop: este valor não pode ser passado para Python "
-        "(apenas int, float, str, bool, none, listas e mapas são suportados)",
+        "python interop: this value cannot be passed to Python "
+        "(only int, float, str, bool, none, lists and maps are supported)",
         line,
     )
 
@@ -169,9 +175,9 @@ def _to_calyre(value, line=None):
     if isinstance(value, dict):
         return {k: _to_calyre(v, line) for k, v in value.items()}
     raise CalyreRuntimeError(
-        f"python interop: o resultado do Python é um objeto do tipo "
-        f"'{type(value).__name__}', que não tem equivalente direto em Calyre "
-        f"(apenas tipos simples, listas e mapas voltam automaticamente)",
+        f"python interop: the Python result is an object of type "
+        f"'{type(value).__name__}', which has no direct Calyre equivalent "
+        f"(only simple types, lists and maps come back automatically)",
         line,
     )
 
@@ -182,16 +188,15 @@ def _build_python():
     def py_call(module_name, func_name, *args):
         if module_name not in _PY_ALLOWED_MODULES:
             raise CalyreRuntimeError(
-                f"python.call: o módulo Python '{module_name}' não está na lista "
-                f"segura ({', '.join(sorted(_PY_ALLOWED_MODULES))}). Isso é uma "
-                f"limitação deliberada desta fase — ver Fase 3, seção de "
-                f"interoperabilidade com Python."
+                f"python.call: the Python module '{module_name}' is not on the "
+                f"safe list ({', '.join(sorted(_PY_ALLOWED_MODULES))}). This is a "
+                f"deliberate restriction (see docs/SPEC.md, Python interoperability)."
             )
         try:
             mod = importlib.import_module(module_name)
             fn = getattr(mod, func_name)
         except (ImportError, AttributeError) as e:
-            raise CalyreRuntimeError(f"python.call: '{module_name}.{func_name}' não existe") from e
+            raise CalyreRuntimeError(f"python.call: '{module_name}.{func_name}' does not exist") from e
 
         py_args = [_to_python(a) for a in args]
         try:
@@ -199,7 +204,7 @@ def _build_python():
         except Exception as e:
             # Python tracebacks never leak to Calyre users — converted to a
             # normal, catchable Calyre error instead.
-            raise CalyreRuntimeError(f"python.call: {module_name}.{func_name} falhou — {e}") from e
+            raise CalyreRuntimeError(f"python.call: {module_name}.{func_name} failed - {e}") from e
         return _to_calyre(result)
 
     members = {

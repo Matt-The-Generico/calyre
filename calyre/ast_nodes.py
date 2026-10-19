@@ -15,6 +15,7 @@ class TypeAnn:
     name: str                       # "int", "float", "bool", "str", "list", or a struct name
     optional: bool = False           # trailing "?"
     params: List["TypeAnn"] = field(default_factory=list)  # for list<T>, Foo<T,...>
+    line: int = 0                    # source line, used for diagnostics
 
 
 # ---- top level / statements ----

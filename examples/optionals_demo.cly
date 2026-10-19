@@ -1,0 +1,38 @@
+// optionals_demo.cly - safe handling of values that may be missing.
+//
+// `T?` means "a T, or none". Calyre will not let you use it as a plain T
+// until you have dealt with the none case.
+
+struct User
+    name: str
+    nickname: str?
+end
+
+func find_user(id: int) -> User?
+    if id == 1
+        return User(name: "Alice", nickname: none)
+    elif id == 2
+        return User(name: "Bob", nickname: "bobby")
+    end
+end
+
+func display_name(id: int) -> str
+    let user = find_user(id)
+    if user == none
+        return "nobody"
+    end
+    // from here on, `user` is known to be a User
+    return user.nickname ?? user.name
+end
+
+func main()
+    for id in [1, 2, 3]
+        print("{id}: {display_name(id)}")
+    end
+
+    let total = 7
+    let count = 2
+    print("average: {total / count}")
+end
+
+main()

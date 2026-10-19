@@ -1,8 +1,7 @@
 """
 Calyre parser.
 
-Recursive-descent parser implementing the EBNF grammar from
-"Calyre — Fase 2: Sintaxe, Gramática e Tipos" (core subset).
+Recursive-descent parser implementing the EBNF grammar (core subset).
 """
 from . import ast_nodes as A
 
@@ -93,6 +92,10 @@ class Parser:
 
     def parse_type(self):
         tok = self.expect("IDENT", "Expected a type name")
+        type_name = tok.value
+        while self.check("DOT"):          # module-qualified type: shapes.Point
+            self.advance()
+            type_name += "." + self.expect("IDENT", "Expected a type name after '.'").value
         params = []
         if self.match("LT"):
             params.append(self.parse_type())
@@ -100,7 +103,7 @@ class Parser:
                 params.append(self.parse_type())
             self.expect("GT", "Expected '>' to close generic type")
         optional = bool(self.match("QUESTION"))
-        return A.TypeAnn(tok.value, optional, params)
+        return A.TypeAnn(type_name, optional, params, tok.line)
 
     def parse_param(self):
         name = self.expect("IDENT").value
@@ -239,11 +242,20 @@ class Parser:
         return self.parse_assignment()
 
     def parse_assignment(self):
-        left = self.parse_or()
+        left = self.parse_coalesce()
         if self.match("EQ"):
             tok = self.peek()
             value = self.parse_assignment()
             return A.Assign(left, value, tok.line)
+        return left
+
+    def parse_coalesce(self):
+        # `value ?? fallback`, use the fallback when value is none
+        left = self.parse_or()
+        while self.check("COALESCE"):
+            tok = self.advance()
+            right = self.parse_or()
+            left = A.BinaryOp("??", left, right, tok.line)
         return left
 
     def parse_or(self):
