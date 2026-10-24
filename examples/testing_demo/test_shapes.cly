@@ -1,0 +1,17 @@
+use "./shapes.cly"
+
+func test_area()
+    assert shapes.area(shapes.Rect(width: 2.0, height: 3.5)) == 7.0
+end
+
+func test_largest_of_nothing_is_none()
+    assert shapes.largest([]) == none
+end
+
+func test_largest_picks_the_biggest()
+    let small = shapes.Rect(width: 1.0, height: 1.0)
+    let big = shapes.Rect(width: 4.0, height: 2.0)
+    let found = shapes.largest([small, big, small])
+    assert found != none
+    assert shapes.area(found) == 8.0
+end

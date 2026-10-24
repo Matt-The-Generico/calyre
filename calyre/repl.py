@@ -2,7 +2,9 @@
 Calyre interactive REPL.
 
 Uses the exact same lexer, parser, type checker and interpreter as a
-normal .cly file.
+normal .cly file — there is no separate "mini Calyre" here. State (
+variables, functions, structs, imported modules) persists for the whole
+session, the same way it would inside one growing .cly file.
 """
 
 import os
@@ -55,7 +57,7 @@ def _try_enable_history():
         return True
     except ImportError:
         # readline isn't available on some platforms (notably parts of
-        # Windows). the REPL still works, just without arrow-key history.
+        # Windows) — the REPL still works, just without arrow-key history.
         return False
 
 
@@ -71,7 +73,7 @@ class Repl:
         print(f"Calyre {__version__}")
         print('Type "help" for help or "exit" to quit.')
         if not has_readline:
-            print("(arrow-key history is unavailable on this platform - 'history' still works)")
+            print("(arrow-key history is unavailable on some platforms. If your platform is included, 'history' still works)")
         print()
 
         while True:
@@ -113,7 +115,7 @@ class Repl:
             try:
                 tokens = tokenize("\n".join(buf))
             except LexError:
-                # might just be an unfinished string/interpolation
+                # might just be an unfinished string/interpolation — keep reading
                 tokens = None
             if tokens is not None and not _is_incomplete(tokens):
                 break

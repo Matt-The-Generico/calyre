@@ -21,13 +21,13 @@ class TestCli(unittest.TestCase):
             code, out, err = cli("run", os.path.join(d, "a.cly"))
             self.assertEqual(code, 1)
             self.assertEqual(out, "")
-            self.assertIn("a.cly:2: error:", err)
+            self.assertIn("a.cly:2:14: error:", err)   # points at the value "no"
             self.assertIn("nothing was run", err)
 
     def test_diagnostic_format_is_file_line_severity(self):
         with project({"a.cly": 'let x = 1\nlet x = 2'}) as d:
             _, _, err = cli("check", os.path.join(d, "a.cly"))
-            self.assertRegex(err, r"a\.cly:2: error: 'x' is already declared")
+            self.assertRegex(err, r"a\.cly:2:1: error: 'x' is already declared")
 
     def test_check_warnings_do_not_fail(self):
         with project({"a.cly": 'let xs = []'}) as d:
@@ -126,6 +126,11 @@ class TestCli(unittest.TestCase):
             _, _, err = cli("run", os.path.join(d, "a.cly"))
             self.assertRegex(err, r"a\.cly:2: runtime error: division by zero")
 
+    def test_the_testing_example_passes_its_own_tests(self):
+        code, out, err = cli("test", os.path.join(EX, "testing_demo"))
+        self.assertEqual(code, 0, out + err)
+        self.assertIn("3 passed", out)
+
     def test_examples_all_check_and_run(self):
         for rel in ("hello.cly", "demo.cly", os.path.join("modules_demo", "main.cly")):
             code, _, err = cli("run", os.path.join(EX, rel))
@@ -134,3 +139,18 @@ class TestCli(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestHelp(unittest.TestCase):
+    def test_help_forms_print_usage_and_succeed(self):
+        for flag in ("help", "--help", "-h"):
+            code, out, err = cli(flag)
+            self.assertEqual(code, 0, flag)
+            for word in ("calyre run", "calyre fmt", "calyre test", "calyre lint", "calyre init"):
+                self.assertIn(word, out)
+            self.assertEqual(err, "")
+
+    def test_unknown_command_points_to_help(self):
+        code, out, err = cli("frobnicate")
+        self.assertEqual((code, out), (1, ""))
+        self.assertIn("calyre help", err)

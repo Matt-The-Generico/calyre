@@ -17,9 +17,32 @@ class TestSpecClaims(unittest.TestCase):
     def test_interpolation_escape(self):
         self.assertEqual(run('print("\\{literal\\} {1 + 1}")').strip(), "{literal} 2")
 
-    def test_truthiness_values(self):
-        self.assertEqual(run('print(not 0)\nprint(not "")\nprint(not [])\nprint(not none)\nprint(not 1)').split(),
-                         ["true", "true", "true", "true", "false"])
+    def test_conditions_require_bool(self):
+        for cond in ("1", '"x"', "[1]", "none", "0"):
+            e = errors(f"if {cond}\n    print(1)\nend")
+            self.assertEqual(len(e), 1, cond)
+            self.assertIn("must be a bool", e[0])
+        self.assertTrue(errors("while 1\n    break\nend"))
+        self.assertTrue(errors("print(not 5)"))
+        self.assertTrue(errors("print(1 and true)"))
+        self.assertTrue(errors("assert 1"))
+        self.assertEqual(errors("let xs: list<int> = [1]\nif len(xs) > 0 and xs[0] == 1\n    print(1)\nend"), [])
+
+    def test_bool_condition_hint_suggests_a_comparison(self):
+        from tests.helpers import analyze
+        self.assertIn("x != 0", analyze("if 1\n    print(1)\nend")[0][0].hint)
+
+    def test_optional_bool_is_not_a_condition(self):
+        self.assertTrue(errors("let b: bool? = true\nif b\n    print(1)\nend"))
+
+    def test_out_of_range_messages_name_the_valid_range(self):
+        from calyre.interpreter import CalyreRuntimeError
+        with self.assertRaises(CalyreRuntimeError) as ctx:
+            run("let xs = [1, 2, 3]\nprint(xs[-4])")
+        self.assertIn("valid indexes are -3 to 2", str(ctx.exception))
+        with self.assertRaises(CalyreRuntimeError) as ctx:
+            run("let xs: list<int> = []\nxs[0] = 1")
+        self.assertIn("empty", str(ctx.exception))
 
     def test_negative_index(self):
         self.assertEqual(run("let xs = [1, 2, 3]\nprint(xs[-1])").strip(), "3")

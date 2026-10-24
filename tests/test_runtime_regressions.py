@@ -50,8 +50,16 @@ class TestRuntimeRegressions(unittest.TestCase):
         self.assertEqual(run("use math\nprint(math.floor_div(7, 2))").strip(), "3")
 
     def test_and_or_return_booleans(self):
-        self.assertEqual(run('print("a" and "b")\nprint(0 or "x")\nprint("" or 0)').split(),
-                         ["true", "true", "false"])
+        self.assertEqual(run('print(true and false)\nprint(false or true)\nprint(not false)').split(),
+                         ["false", "true", "true"])
+
+    def test_non_bool_conditions_are_runtime_errors_at_dynamic_boundaries(self):
+        # the checker rejects these statically; `any` values are checked when they run
+        for src in ('let a: any = 1\nif a\n    print(1)\nend', 'let a: any = 0\nwhile a\n    break\nend',
+                    'let a: any = "x"\nprint(not a)', 'let a: any = 1\nprint(a and true)'):
+            with self.assertRaises(CalyreRuntimeError) as ctx:
+                run(src)
+            self.assertIn("must be a bool", str(ctx.exception))
 
     def test_and_or_short_circuit(self):
         self.assertEqual(run('func boom() -> bool\n    error("no")\nend\nprint(false and boom())\nprint(true or boom())').split(),

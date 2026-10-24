@@ -2,91 +2,77 @@
 
 ![Calyre logo](./assets/calyre-logo.png)
 
-A statically typed, readable programming language. This repository holds the
-reference implementation (lexer, parser, type checker, interpreter, REPL, CLI).
-Official language: English (syntax, keywords, standard library, documentation).
+A statically typed, readable programming language. This repository is the reference implementation: lexer, parser, type checker,
+interpreter, REPL and the official tools (formatter, test runner, linter). The language, its keywords, standard library, messages and
+reference documentation are in English; [`docs/pt/COMECANDO.md`](docs/pt/COMECANDO.md) is an introduction in Portuguese.
 
-```calyre
-use math
+```calyre run
+use json
 
-func area(radius: float) -> float
-    return math.pi * radius * radius
+struct Reading
+    city: str
+    celsius: float?
 end
 
-let name: str? = none
-print("Hello, {name ?? "world"}! Area: {area(2.0)}")
+func describe(r: Reading) -> str
+    return "{r.city}: {r.celsius ?? 0.0} degrees"
+end
+
+let readings = [Reading(city: "Fortaleza", celsius: 31.5), Reading(city: "Oslo", celsius: none)]
+for r in readings
+    print(describe(r))
+end
+print(json.stringify(readings[0]))
+```
+
+```output
+Fortaleza: 31.5 degrees
+Oslo: 0.0 degrees
+{"city":"Fortaleza","celsius":31.5}
 ```
 
 ## Use it
 
-```bash
-python3 calyre_entry.py run examples/hello.cly     # or ./dist/calyre run ...
-python3 calyre_entry.py check examples/demo.cly    # analyze only
-python3 calyre_entry.py                            # REPL
-python3 calyre_entry.py init my_project
-python3 -m unittest discover -s tests              # 215 tests
-python3 benchmarks/bench.py                        # reproducible timings
+```text
+python3 calyre_entry.py run examples/hello.cly      # from source: Python 3.11+, no dependencies
+python3 calyre_entry.py                             # the REPL
+python3 calyre_entry.py test examples/testing_demo  # run Calyre tests
+python3 -m unittest discover -s tests               # the implementation's own tests
+python3 scripts/build.py                            # standalone executable for this OS (needs PyInstaller)
+python3 benchmarks/bench.py                         # timings per phase
 ```
 
-Requires Python 3.11+ only to run from source. `dist/calyre` is a single
-PyInstaller executable (Linux x86_64) that needs no Python.
-There is also a calyre.exe for Windows.
+The executable needs no Python, compiler or any other tool. Executables for other operating systems must be built on those systems:
+see [docs/DISTRIBUTION.md](docs/DISTRIBUTION.md) for what is verified and what is not.
 
-Documents: [docs/SPEC.md](docs/SPEC.md) (language reference) ·
-[docs/ROADMAP.md](docs/ROADMAP.md) (consolidated plan) ·
-[CHANGELOG.md](CHANGELOG.md) (incl. breaking changes and migration).
+## What the language has
 
----
+Static types with inference · generics for functions and structs · `T?` optionals with flow-sensitive narrowing and `??` ·
+typed lists and maps · methods on lists, maps and texts · structs · modules with explicit `pub` exports and imports by name or by file path ·
+`try/catch` · self-explaining `assert` · `"""` literal texts · diagnostics with file, line, column and hints ·
+a standard library (`math random time fs path json system sql`) · a restricted Python bridge.
 
-## Audit (Phase 4, version 0.2.0 stable)
+Tools: `calyre run | check | fmt | test | lint | init | add | remove | list | version`, and a REPL. See [docs/TOOLS.md](docs/TOOLS.md).
 
-Method: baseline test run, then ~15 probe programs written to contradict the
-documentation. Every finding below was reproduced before being fixed; each fix
-has a regression test that failed before the fix.
+## Documentation
 
-**Initial state:** 76 tests, all passing. 2,812 lines of Python. The tests only
-covered valid programs and a few type errors, which is why the bugs below survived.
+| Document | Contents |
+|----------|----------|
+| [docs/SPEC.md](docs/SPEC.md) | the language reference (every example is executed by the tests) |
+| [docs/STDLIB.md](docs/STDLIB.md) | builtins, methods, modules (the tests fail if anything is undocumented) |
+| [docs/TOOLS.md](docs/TOOLS.md) | CLI, formatter, test runner, linter, projects, exit codes |
+| [docs/DISTRIBUTION.md](docs/DISTRIBUTION.md) | building and verifying executables |
+| [docs/ROADMAP.md](docs/ROADMAP.md) | the consolidated plan and what is done |
+| [docs/AUDIT.md](docs/AUDIT.md) | findings of each audit round |
+| [CHANGELOG.md](CHANGELOG.md) | changes, breaking changes and migrations |
 
-| # | Severity | Finding (reproduced) | Status |
-|---|----------|----------------------|--------|
-| 1 | high | Python tracebacks leaked: wrong builtin arity (`len(1,2)`), infinite recursion, top-level `break`/`return`, list assignment out of range | fixed |
-| 2 | high | `break` inside a function escaped into the *caller's* loop | fixed |
-| 3 | high | Duplicate `let`/`func`/`struct`/parameter/field silently accepted (`let x = 1` then `let x = "a"`) | fixed (error) |
-| 4 | high | Declared return types never verified for missing paths: `-> int` falling off the end returned `none` | fixed |
-| 5 | high | Unknown type names (`let p: Pointt`) silently became `any` | fixed (error + suggestion) |
-| 6 | high | `/` on ints returned an int or a float depending on the *values* (`6/2`→3, `7/2`→3.5) while the checker claimed `int` | fixed: `/` is always float |
-| 7 | high | Optionals were unusable: no way to narrow or unwrap | fixed: narrowing + `??` |
-| 8 | high | Types did not cross modules (member calls were `any`); missing modules only failed at run time | fixed |
-| 9 | medium | `and`/`or` returned operands at run time but were typed `bool` | fixed: always bool |
-| 10 | medium | Struct field assignment unchecked; mixed lists silently became `list<any>` | fixed |
-| 11 | medium | `calyre add` wrote `calyre.toml` but `use` never read it (dependencies did nothing) | fixed |
-| 12 | medium | Runtime errors in an imported module were reported against the main file; messages mixed Portuguese and English | fixed |
-| 13 | medium | Functions without a return annotation returned unchecked `any` | fixed: inferred |
-| 14 | low | Dispatch built an f-string per AST node | fixed (~30% faster) |
+The older `calyre-fase*.md` design notes are historical (Portuguese) and superseded by the documents above.
 
-**State after this round:** 215 tests passing (76 original + 139 new: semantics,
-cross-module types, runtime regressions, dependencies, end-to-end CLI).
-One original test was changed on purpose: it asserted that importing a
-non-existent module is accepted silently; it now asserts the opposite.
+## Status
 
-### Still open (not done in this version)
+Reference interpreter (tree-walking); the type checker, formatter, test runner and linter share one parser and one AST.
+Tested on Linux only: the Windows and macOS builds and the CI workflow have not been run. Known gaps (language server, VS Code extension,
+first-class functions, enums and unions, more standard modules, package registry and lockfile) are listed in the roadmap.
 
-* Generics (`func f<T>`, `struct Box<T>`), so `math.abs/min/max/pow` and
-  `random.choice` are still typed `any` on purpose; lists have no `append` yet.
-* Diagnostics carry a line but no column (blocks an LSP and good editor squiggles).
-* Comments are discarded by the lexer (blocks a formatter that preserves them).
-* No formatter, linter, `calyre test`, debugger, LSP or VS Code extension (yet!).
-* Standard library lacks json, path, system/env/args, process, datetime, regex, http (planned on next version).
-* `if`/`while` accept any value as a condition (truthiness), a pending design decision (it will change next version).
-* Execution is a tree-walking interpreter (≈0.8 s for 200k loop iterations);
-  call depth is capped at 800. No evidence yet justifies a VM.
-* Only Linux was tested.
-* Interactive features (`input_*`, arrow-key history) are only covered by piped-stdin tests.
-
-### Benchmarks (best of 3, type check excluded, same Linux machine)
-
-| program | before | after |
-|---------|-------:|------:|
-| fib(22) recursion | 445 ms | 323 ms |
-| 200k loop additions | 1221 ms | 812 ms |
-| 20k map writes+reads | 131 ms | 84 ms |
+Performance (see `benchmarks/bench.py`): parsing and analysis take well under a millisecond for these programs; execution dominates,
+at roughly 4 µs per simple loop iteration. There is no evidence yet that a bytecode VM is needed.

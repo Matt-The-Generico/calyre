@@ -1,10 +1,11 @@
 """
 Calyre tree-walking interpreter.
 
-This is the *reference* execution engine for the language core. It is intentionally a
+This is the *reference* execution engine for the language core described in
+docs/SPEC.md. It is intentionally a
 tree-walking interpreter, not a compiler: the goal of this phase is a
 correct, readable implementation of the full core grammar. Types are
-enforced at *runtime* here, full static (compile-time) type-checking is
+enforced at *runtime* here — full static (compile-time) type-checking is
 scoped for a later phase, and the language design already assumes it.
 """
 
@@ -26,7 +27,7 @@ class CalyreRuntimeError(Exception):
 
 
 class CalyreUserError(CalyreRuntimeError):
-    """Raised by the builtin `error(message)`, a deliberate, catchable failure."""
+    """Raised by the builtin `error(message)` — a deliberate, catchable failure."""
     pass
 
 
@@ -112,7 +113,7 @@ class StructInstance:
         self.fields = fields
 
     def __repr__(self):
-        inner = ", ".join(f"{k}: {calyre_repr(v)}" for k, v in self.fields.items())
+        inner = ", ".join(f"{k}: {_repr_item(v)}" for k, v in self.fields.items())
         return f"{self.type_name}({inner})"
 
 
@@ -157,7 +158,7 @@ class CalyreFunction:
         if interpreter.call_depth > MAX_CALL_DEPTH:
             interpreter.call_depth = 0
             raise CalyreRuntimeError(
-                f"maximum call depth ({MAX_CALL_DEPTH}) exceeded in '{self.name}' : "
+                f"maximum call depth ({MAX_CALL_DEPTH}) exceeded in '{self.name}' — "
                 f"a function probably calls itself without ever stopping",
                 self.decl.line,
             )
@@ -188,24 +189,31 @@ class BuiltinFunction:
         self.fn = fn
 
     def call(self, interpreter, args, line=None):
-        try:
-            sig = inspect.signature(self.fn)
-            sig.bind(*args)
-        except TypeError as e:
-            raise CalyreRuntimeError(
-                f"'{self.name}' was called with the wrong number of arguments ({len(args)} given)",
-                line,
-            ) from e
-        except ValueError:
-            pass  # signature not introspectable (some C builtins): let the call decide
+        # The checker already validated arity for statically-known calls, so the hot path just calls.
+        # (Measured: inspecting the signature on every call cost ~10 microseconds, most of a list.append.)
         try:
             return self.fn(*args)
-        except CalyreRuntimeError:
+        except CalyreRuntimeError as e:
+            if e.line is None:
+                e.line = line          # blame the call site, not "somewhere"
             raise
         except (TypeError, AttributeError, ValueError, OverflowError) as e:
+            if isinstance(e, TypeError) and self._wrong_arity(args):
+                raise CalyreRuntimeError(
+                    f"'{self.name}' was called with the wrong number of arguments ({len(args)} given)",
+                    line) from e
             raise CalyreRuntimeError(
                 f"'{self.name}' cannot be used with these argument types: {e}", line
             ) from e
+
+    def _wrong_arity(self, args):
+        try:
+            inspect.signature(self.fn).bind(*args)
+            return False
+        except TypeError:
+            return True
+        except ValueError:
+            return False
 
     def __repr__(self):
         return f"<builtin {self.name}>"
@@ -224,11 +232,19 @@ def calyre_repr(value):
             return f"{value:.1f}"
         return repr(value)
     if isinstance(value, list):
-        return "[" + ", ".join(calyre_repr(v) for v in value) + "]"
+        return "[" + ", ".join(_repr_item(v) for v in value) + "]"
     if isinstance(value, dict):
-        inner = ", ".join(f"{calyre_repr(k)}: {calyre_repr(v)}" for k, v in value.items())
+        inner = ", ".join(f"{_repr_item(k)}: {_repr_item(v)}" for k, v in value.items())
         return "{" + inner + "}"
     return str(value)
+
+
+def _repr_item(value):
+    """Inside a collection or struct, texts are shown quoted so the output is unambiguous."""
+    if isinstance(value, str):
+        escaped = value.replace("\\", "\\\\").replace('"', '\\"').replace("\n", "\\n")
+        return f'"{escaped}"'
+    return calyre_repr(value)
 
 
 def _builtin_print(*args):
@@ -395,14 +411,14 @@ class Interpreter:
 
     def exec_IfStmt(self, stmt: A.IfStmt, env):
         for cond, block in stmt.branches:
-            if _truthy(self.eval(cond, env)):
+            if _cond(self.eval(cond, env), cond.line, "an 'if' condition"):
                 self.exec_block(block, Environment(env))
                 return
         if stmt.else_block is not None:
             self.exec_block(stmt.else_block, Environment(env))
 
     def exec_WhileStmt(self, stmt: A.WhileStmt, env):
-        while _truthy(self.eval(stmt.condition, env)):
+        while _cond(self.eval(stmt.condition, env), stmt.line, "a 'while' condition"):
             try:
                 self.exec_block(stmt.body, Environment(env))
             except _BreakSignal:
@@ -414,6 +430,8 @@ class Interpreter:
         iterable = self.eval(stmt.iterable, env)
         if isinstance(iterable, dict):
             iterable = list(iterable.keys())  # `for k in a_map` iterates over keys
+        elif isinstance(iterable, list):
+            iterable = list(iterable)          # the loop visits the elements present at its start
         if not isinstance(iterable, (list, str)):
             raise CalyreRuntimeError(
                 "'for ... in' expects a list, a map, a text or range(...)", stmt.line
@@ -451,23 +469,24 @@ class Interpreter:
     def exec_UseStmt(self, stmt: A.UseStmt, env):
         from .stdlib import STDLIB_MODULES
 
-        bound_name = stmt.alias or stmt.path.split(".")[-1]
-
-        if stmt.path in STDLIB_MODULES:
+        if not stmt.by_path and stmt.path in STDLIB_MODULES:
             module = STDLIB_MODULES[stmt.path]()
-            env.define(bound_name, module)
+        else:
+            module = self._load_local_module(stmt.path, stmt.line, stmt.by_path)
+        if stmt.names is not None:                   # use a, b as c from module
+            for name, alias in stmt.names:
+                env.define(alias or name, module.get(name, stmt.line))
             return
+        env.define(stmt.alias or stmt.default_name(), module)
 
-        module = self._load_local_module(stmt.path, stmt.line)
-        env.define(bound_name, module)
-
-    def _load_local_module(self, path, line):
+    def _load_local_module(self, path, line, by_path=False):
         import os
 
         from . import resolver
-        file_path = resolver.resolve(path, self.base_dir)
+        file_path = resolver.resolve_import(path, self.base_dir, by_path)
         if file_path is None:
-            raise CalyreRuntimeError(f"'use {path}': cannot find the module", line)
+            raise CalyreRuntimeError(
+                f"cannot find module '{path}': " + resolver.describe_lookup(path, self.base_dir, by_path), line)
 
         if file_path in self.module_cache:
             return self.module_cache[file_path]
@@ -516,11 +535,10 @@ class Interpreter:
         finally:
             self.loading_stack.pop()
 
-        exported = {
-            name: value
-            for name, value in module_interp.globals.vars.items()
-            if not name.startswith("_") and name not in BUILTINS
-        }
+        from .visibility import exported_names
+        defined = {n for n in module_interp.globals.vars if n not in BUILTINS}
+        names, _ = exported_names(program, defined)
+        exported = {n: module_interp.globals.vars[n] for n in names}
         module = Module(path, exported)
         self.module_cache[file_path] = module
         return module
@@ -537,7 +555,7 @@ class Interpreter:
 
     def exec_AssertStmt(self, stmt: A.AssertStmt, env):
         result = self.eval(stmt.expr, env)
-        if _truthy(result):
+        if _cond(result, stmt.line, "an 'assert' condition"):
             return
         if stmt.message is not None:
             detail = calyre_repr(self.eval(stmt.message, env))
@@ -590,7 +608,7 @@ class Interpreter:
     def eval_UnaryOp(self, node: A.UnaryOp, env):
         value = self.eval(node.operand, env)
         if node.op == "not":
-            return not _truthy(value)
+            return not _cond(value, node.line, "the operand of 'not'")
         if node.op == "-":
             _check_number(value, node.line)
             return -value
@@ -599,16 +617,16 @@ class Interpreter:
     def eval_BinaryOp(self, node: A.BinaryOp, env):
         op = node.op
         if op == "and":
-            if not _truthy(self.eval(node.left, env)):
+            if not _cond(self.eval(node.left, env), node.line, "the left side of 'and'"):
                 return False
-            return _truthy(self.eval(node.right, env))
+            return _cond(self.eval(node.right, env), node.line, "the right side of 'and'")
         if op == "??":
             left = self.eval(node.left, env)
             return left if left is not None else self.eval(node.right, env)
         if op == "or":
-            if _truthy(self.eval(node.left, env)):
+            if _cond(self.eval(node.left, env), node.line, "the left side of 'or'"):
                 return True
-            return _truthy(self.eval(node.right, env))
+            return _cond(self.eval(node.right, env), node.line, "the right side of 'or'")
 
         left = self.eval(node.left, env)
         right = self.eval(node.right, env)
@@ -650,6 +668,15 @@ class Interpreter:
             return obj.fields[node.name]
         if isinstance(obj, Module):
             return obj.get(node.name, node.line)
+        from .methods import method_table
+        table = method_table(obj)
+        if table is not None:
+            if node.name not in table:
+                raise CalyreRuntimeError(
+                    f"this {_runtime_type_name(obj)} has no method '{node.name}'", node.line)
+            impl = table[node.name][2]
+            return BuiltinFunction(f"{_runtime_type_name(obj)}.{node.name}",
+                                   lambda *args, _o=obj, _f=impl: _f(_o, *args))
         raise CalyreRuntimeError(
             f"'.{node.name}' cannot be used on a value of this type", node.line
         )
@@ -665,10 +692,13 @@ class Interpreter:
             raise CalyreRuntimeError("only lists, maps and texts can be indexed", node.line)
         if not isinstance(idx, int) or isinstance(idx, bool):
             raise CalyreRuntimeError("an index must be an int", node.line)
-        try:
-            return obj[idx]
-        except IndexError as e:
-            raise CalyreRuntimeError(f"index {idx} is out of range", node.line) from e
+        if not -len(obj) <= idx < len(obj):
+            what = "text" if isinstance(obj, str) else "list"
+            raise CalyreRuntimeError(
+                f"index {idx} is out of range (the {what} has {len(obj)} element(s); "
+                f"valid indexes are {-len(obj)} to {len(obj) - 1})" if len(obj) else
+                f"index {idx} is out of range (the {what} is empty)", node.line)
+        return obj[idx]
 
     def eval_Assign(self, node: A.Assign, env):
         value = self.eval(node.value, env)
@@ -694,19 +724,42 @@ class Interpreter:
                 raise CalyreRuntimeError("an index must be an int", node.line)
             if not -len(obj) <= idx < len(obj):
                 raise CalyreRuntimeError(
-                    f"index {idx} is out of range (the list has {len(obj)} element(s))", node.line
+                    f"index {idx} is out of range (the list has {len(obj)} element(s); "
+                    f"valid indexes are {-len(obj)} to {len(obj) - 1})" if len(obj) else
+                    f"index {idx} is out of range (the list is empty)", node.line
                 )
             obj[idx] = value
             return value
         raise CalyreRuntimeError("invalid assignment target", node.line)
 
 
-def _truthy(value):
-    if isinstance(value, bool):
+def _cond(value, line, what):
+    """Conditions must be real booleans: no implicit truthiness (language decision)."""
+    if value is True or value is False:
         return value
-    if value is None:
-        return False
-    return bool(value)
+    raise CalyreRuntimeError(
+        f"{what} must be a bool, but the value is {calyre_repr(value)} "
+        f"({_runtime_type_name(value)}); write an explicit comparison such as `x != 0`",
+        line,
+    )
+
+
+def _runtime_type_name(v):
+    if v is None:
+        return "none"
+    if isinstance(v, bool):
+        return "bool"
+    if isinstance(v, int):
+        return "int"
+    if isinstance(v, float):
+        return "float"
+    if isinstance(v, str):
+        return "str"
+    if isinstance(v, list):
+        return "list"
+    if isinstance(v, dict):
+        return "map"
+    return type(v).__name__
 
 
 def _check_number(value, line):
@@ -793,8 +846,8 @@ _COMPARISON_OPS = {"==", "!=", "<", ">", "<=", ">="}
 def _unparse(node):
     """Best-effort reconstruction of an expression's source text, used to
     make `assert` failures self-explaining without the user writing a
-    custom message. Not a full pretty-printer, just enough for common
-    expressions."""
+    custom message. Not a full pretty-printer — just enough for common
+    expressions (see Phase 3 notes on the `assert` feature)."""
     if isinstance(node, A.Literal):
         return calyre_repr(node.value) if not isinstance(node.value, str) else f'"{node.value}"'
     if isinstance(node, A.Identifier):
@@ -815,7 +868,7 @@ def _unparse(node):
 
 def _describe_failed_assert(node, env, interpreter):
     """Calyre's `assert` is self-explaining: it doesn't just say the
-    condition was false, it shows the values that made it false, an
+    condition was false, it shows the values that made it false — an
     original, small feature aimed squarely at reducing the distance
     between 'my program is wrong' and 'I know why'."""
     text = _unparse(node)

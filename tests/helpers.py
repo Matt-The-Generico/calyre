@@ -55,3 +55,14 @@ def project(files):
             with open(path, "w", encoding="utf-8") as f:
                 f.write(content)
         yield d
+
+
+def ast_dump(node):
+    """Structure of an AST without positions, to compare programs by meaning."""
+    import dataclasses
+    if dataclasses.is_dataclass(node):
+        return (type(node).__name__,) + tuple(
+            ast_dump(getattr(node, f.name)) for f in dataclasses.fields(node) if f.name not in ("line", "col"))
+    if isinstance(node, (list, tuple)):
+        return tuple(ast_dump(x) for x in node)
+    return node

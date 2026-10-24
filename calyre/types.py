@@ -16,7 +16,14 @@ A type is either a plain string or a tuple:
                                                 It suppresses follow-up errors so a
                                                 single mistake yields a single message.
     ("list", T)   ("map", K, V)   ("optional", T)
-    ("struct", key)                             instance of a struct
+    ("struct", key)  or  ("struct", key, (T1, ...))
+                                                instance of a struct (with type arguments
+                                                when the struct is generic: Box<int>)
+    ("tvar", name)  or  ("tvar", name, bound)   a type parameter (inside a generic function
+                                                or struct); opaque: only compatible with
+                                                itself. `bound` restricts what it may be
+                                                bound to (used by the stdlib: number)
+    ("gfunc", (tvars...), [params], ret)        a generic function; instantiated at each call
     ("structdef", key)                          the struct itself (its constructor)
     ("func", [params], ret)  or  ("func", [params], ret, True)   # True = extra args allowed
     ("builtin", name)                           a builtin function (see BUILTIN_SPECS)
@@ -66,7 +73,15 @@ def type_name(t):
     if kind == "optional":
         return f"{type_name(t[1])}?"
     if kind == "struct":
-        return t[1].lstrip("$")      # "$Error" is the reserved key of the builtin Error struct
+        base = t[1].lstrip("$")      # "$Error" is the reserved key of the builtin Error struct
+        if len(t) > 2 and t[2]:
+            return f"{base}<{', '.join(type_name(a) for a in t[2])}>"
+        return base
+    if kind == "tvar":
+        return t[1]
+    if kind == "gfunc":
+        names = ", ".join(v[1] for v in t[1])
+        return f"func<{names}>({', '.join(type_name(p) for p in t[2])}) -> {type_name(t[3])}"
     if kind == "structdef":
         return f"struct {t[1]}"
     if kind == "func":
@@ -98,17 +113,69 @@ def compatible(expected, actual):
         return False
     if is_optional(actual):
         return False          # an optional value is NOT usable where a plain one is required
+    if isinstance(expected, tuple) and expected[0] == "tvar":
+        return isinstance(actual, tuple) and actual[0] == "tvar" and actual[1] == expected[1]
+    if isinstance(actual, tuple) and actual[0] == "tvar":
+        return False
     if isinstance(expected, tuple) and isinstance(actual, tuple):
         if expected[0] != actual[0]:
             return False
+        if expected[0] == "struct":
+            if expected[1] != actual[1]:
+                return False
+            ea = expected[2] if len(expected) > 2 else ()
+            aa = actual[2] if len(actual) > 2 else ()
+            return len(ea) == len(aa) and all(compatible(x, y) for x, y in zip(ea, aa))
         if expected[0] == "list":
             return compatible(expected[1], actual[1])
         if expected[0] == "map":
             return compatible(expected[1], actual[1]) and compatible(expected[2], actual[2])
-        if expected[0] == "struct":
-            return expected[1] == actual[1]
         return expected == actual
     return expected == actual
+
+
+def has_tvars(t):
+    if isinstance(t, tuple):
+        k = t[0]
+        if k == "tvar":
+            return True
+        if k in ("list", "optional"):
+            return has_tvars(t[1])
+        if k == "map":
+            return has_tvars(t[1]) or has_tvars(t[2])
+        if k == "struct" and len(t) > 2:
+            return any(has_tvars(a) for a in t[2])
+    return False
+
+
+def tvar_names(t):
+    """Names of every type variable occurring in `t`."""
+    if isinstance(t, tuple):
+        k = t[0]
+        if k == "tvar":
+            return {t[1]}
+        if k in ("list", "optional"):
+            return tvar_names(t[1])
+        if k == "map":
+            return tvar_names(t[1]) | tvar_names(t[2])
+        if k == "struct" and len(t) > 2:
+            return set().union(*(tvar_names(a) for a in t[2])) if t[2] else set()
+    return set()
+
+
+def subst(t, mapping):
+    """Replace type variables by name; variables missing from `mapping` become UNKNOWN."""
+    if isinstance(t, tuple):
+        k = t[0]
+        if k == "tvar":
+            return mapping.get(t[1], UNKNOWN)
+        if k in ("list", "optional"):
+            return (k, subst(t[1], mapping))
+        if k == "map":
+            return ("map", subst(t[1], mapping), subst(t[2], mapping))
+        if k == "struct" and len(t) > 2:
+            return ("struct", t[1], tuple(subst(a, mapping) for a in t[2]))
+    return t
 
 
 def strip_optional(t):

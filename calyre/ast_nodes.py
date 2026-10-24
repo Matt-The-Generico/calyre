@@ -31,6 +31,7 @@ class LetStmt:
     type_ann: Optional[TypeAnn]
     value: Any
     line: int
+    public: bool = False
 
 
 @dataclass
@@ -46,6 +47,8 @@ class FuncDecl:
     return_type: Optional[TypeAnn]
     body: list
     line: int
+    type_params: list = field(default_factory=list)   # names: func f<T, U>
+    public: bool = False
 
 
 @dataclass
@@ -53,6 +56,8 @@ class StructDecl:
     name: str
     fields: List[Param]
     line: int
+    type_params: list = field(default_factory=list)   # names: struct Box<T>
+    public: bool = False
 
 
 @dataclass
@@ -105,6 +110,15 @@ class UseStmt:
     path: str
     alias: Optional[str]
     line: int
+    names: Optional[list] = None      # `use a, b as c from m` -> [("a", None), ("b", "c")]
+    by_path: bool = False             # `use "./lib.cly"`: `path` is a file path, not a module name
+
+    def default_name(self):
+        """The name `use` binds when there is no `as`: last module segment, or the file's stem."""
+        if self.by_path:
+            base = self.path.replace("\\", "/").rsplit("/", 1)[-1]
+            return base[:-4] if base.endswith(".cly") else base
+        return self.path.split(".")[-1]
 
 
 @dataclass

@@ -1,0 +1,23 @@
+// shapes.cly - a small library with tests next to it (run: calyre test examples/testing_demo)
+
+pub struct Rect
+    width: float
+    height: float
+end
+
+pub func area(r: Rect) -> float
+    return r.width * r.height
+end
+
+pub func largest(rects: list<Rect>) -> Rect?
+    if len(rects) == 0
+        return none
+    end
+    let best = rects[0]
+    for r in rects
+        if area(r) > area(best)
+            best = r
+        end
+    end
+    return best
+end

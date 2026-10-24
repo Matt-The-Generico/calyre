@@ -22,25 +22,42 @@ from . import ast_nodes as A
 from .lexer import tokenize, LexError
 from .calyre_parser import parse, ParseError
 from . import resolver
+from .visibility import exported_names
+from .methods import METHODS, SORTABLE
+from .sqlmod import NATIVE_METHODS
 from .stdlib_types import STDLIB_SIGNATURES, BUILTIN_SPECS
 from .types import (
     ANY, UNKNOWN, NONE_T, type_name, compatible, is_numeric, is_optional,
-    is_permissive, contains_unknown, strip_optional,
+    is_permissive, contains_unknown, strip_optional, has_tvars, subst, tvar_names,
 )
 
 _PRIMITIVES = ("int", "float", "str", "bool", "any")
 _ERROR_KEY = "$Error"
 
 
+def _where(where):
+    """(line, column) of an AST node, a (line, col) pair, an int line, or None."""
+    if where is None:
+        return None, 0
+    if isinstance(where, int):
+        return where, 0
+    if isinstance(where, tuple):
+        return where
+    return getattr(where, "line", None), getattr(where, "col", 0)
+
+
 class Diagnostic:
-    def __init__(self, message, line, severity="error", hint=None):
+    def __init__(self, message, line, severity="error", hint=None, col=0):
         self.message = message
-        self.line = line
+        self.line, self.col = (line, col) if isinstance(line, int) or line is None else _where(line)
+        if isinstance(line, int) and col == 0:
+            self.col = 0
         self.severity = severity
         self.hint = hint
 
     def format(self, path):
-        text = f"{path}:{self.line}: {self.severity}: {self.message}"
+        pos = f"{self.line}:{self.col}" if self.col else f"{self.line}"
+        text = f"{path}:{pos}: {self.severity}: {self.message}"
         if self.hint:
             text += f"\n    hint: {self.hint}"
         return text
@@ -88,10 +105,13 @@ class Scope:
 
 
 class ModuleInfo:
-    def __init__(self, members, registry, errors):
+    def __init__(self, members, registry, errors, hidden=frozenset(), explicit=False, struct_params=None):
+        self.struct_params = struct_params or {}
         self.members = members
         self.registry = registry
         self.errors = errors
+        self.hidden = hidden          # defined in the module but not exported
+        self.explicit = explicit      # True when the module uses `pub`
 
 
 class Context:
@@ -100,6 +120,19 @@ class Context:
     def __init__(self):
         self.cache = {}
         self.stack = []
+        self.prefixes = {}          # canonical file -> the name its types are shown under
+        self.used_prefixes = set()
+
+    def prefix_for(self, file_path, preferred):
+        """One stable display/identity prefix per file (`shapes`, `lib`, `lib#2` if two files collide),
+        so the same file imported by name and by path is the same module with the same types."""
+        if file_path not in self.prefixes:
+            name, n = preferred, 2
+            while name in self.used_prefixes:
+                name, n = f"{preferred}#{n}", n + 1
+            self.prefixes[file_path] = name
+            self.used_prefixes.add(name)
+        return self.prefixes[file_path]
 
 
 # ---------------------------------------------------------------- helpers
@@ -163,8 +196,16 @@ def _contains_break(block):
 
 def _requalify(t, prefix, local_keys):
     if isinstance(t, tuple):
-        if t[0] in ("struct", "structdef") and t[1] in local_keys:
-            return (t[0], f"{prefix}.{t[1]}")
+        if t[0] == "structdef" and t[1] in local_keys:
+            return ("structdef", f"{prefix}.{t[1]}")
+        if t[0] == "struct":
+            key = f"{prefix}.{t[1]}" if t[1] in local_keys else t[1]
+            if len(t) > 2:
+                return ("struct", key, tuple(_requalify(a, prefix, local_keys) for a in t[2]))
+            return ("struct", key)
+        if t[0] == "gfunc":
+            return ("gfunc", t[1], [_requalify(p, prefix, local_keys) for p in t[2]],
+                    _requalify(t[3], prefix, local_keys))
         if t[0] in ("list", "optional"):
             return (t[0], _requalify(t[1], prefix, local_keys))
         if t[0] == "map":
@@ -186,8 +227,12 @@ class Checker:
         self.repl = repl
         self.silent = 0
         self.registry = {_ERROR_KEY: {"message": "str", "line": ("optional", "int")}}
+        for key in NATIVE_METHODS:                 # opaque native types (sql.Database): no fields, only methods
+            self.registry[key] = {}
         self.types = {}                 # struct name -> registry key
         self.pending_structs = []
+        self.struct_params = {}         # struct key -> tuple of type parameter names
+        self.tparams = []               # stack of {name: ("tvar", name)} for generic scopes
         self.predeclared = set()        # id() of top-level funcs/structs declared in pass 1
         self.builtin_scope = Scope()
         for name in BUILTIN_SPECS:
@@ -197,13 +242,15 @@ class Checker:
 
     # ----- diagnostics
 
-    def error(self, message, line, hint=None):
+    def error(self, message, where, hint=None):
         if not self.silent:
-            self.diagnostics.append(Diagnostic(message, line, "error", hint))
+            line, col = _where(where)
+            self.diagnostics.append(Diagnostic(message, line, "error", hint, col))
 
-    def warn(self, message, line, hint=None):
+    def warn(self, message, where, hint=None):
         if not self.silent:
-            self.diagnostics.append(Diagnostic(message, line, "warning", hint))
+            line, col = _where(where)
+            self.diagnostics.append(Diagnostic(message, line, "warning", hint, col))
 
     # ----- entry point
 
@@ -243,56 +290,88 @@ class Checker:
 
     # ----- declarations
 
-    def declare(self, scope, name, t, line, what="name"):
+    def declare(self, scope, name, t, where, what="name"):
+        line = _where(where)[0]
         prior = scope.vars.get(name)
         if prior is not None and not prior.narrowed and not (self.repl and scope is self.module_scope):
-            where = f" (first declared on line {prior.line})" if prior.line else ""
-            self.error(f"'{name}' is already declared in this scope{where}", line,
+            where_txt = f" (first declared on line {prior.line})" if prior.line else ""
+            self.error(f"'{name}' is already declared in this scope{where_txt}", where,
                        "use a different name, or assign with `name = value` to change the existing variable"
                        if what == "variable" else "use a different name")
         scope.vars[name] = Binding(t, t, line)
 
     def declare_struct(self, stmt, scope):
         if stmt.name in self.types and not self.repl:
-            self.error(f"struct '{stmt.name}' is declared more than once", stmt.line)
+            self.error(f"struct '{stmt.name}' is declared more than once", stmt)
             return
         key = stmt.name
         self.types[stmt.name] = key
+        self.struct_params[key] = tuple(stmt.type_params)
         self.registry[key] = {}
         self.pending_structs.append((key, stmt))
-        self.declare(scope, stmt.name, ("structdef", key), stmt.line)
+        self.declare(scope, stmt.name, ("structdef", key), stmt)
 
     def resolve_pending_structs(self, scope):
         pending, self.pending_structs = self.pending_structs, []
         for key, stmt in pending:
             fields = {}
+            self.tparams.append({n: ("tvar", n) for n in stmt.type_params})
             for f in stmt.fields:
                 if f.name in fields:
-                    self.error(f"struct '{stmt.name}' has two fields named '{f.name}'", stmt.line)
+                    self.error(f"struct '{stmt.name}' has two fields named '{f.name}'", stmt)
                     continue
-                fields[f.name] = self.resolve_ann(f.type_ann, scope, stmt.line)
+                fields[f.name] = self.resolve_ann(f.type_ann, scope, stmt)
+            self.tparams.pop()
             self.registry[key] = fields
 
     def declare_func(self, stmt, scope):
+        tvars = tuple(("tvar", n) for n in stmt.type_params)
+        self.tparams.append({v[1]: v for v in tvars})
         ptypes, seen = [], set()
         for p in stmt.params:
             if p.name in seen:
-                self.error(f"function '{stmt.name}' has two parameters named '{p.name}'", stmt.line)
+                self.error(f"function '{stmt.name}' has two parameters named '{p.name}'", stmt)
             seen.add(p.name)
-            ptypes.append(self.resolve_ann(p.type_ann, scope, stmt.line))
-        ret = self.resolve_ann(stmt.return_type, scope, stmt.line) if stmt.return_type else UNKNOWN
-        self.declare(scope, stmt.name, ("func", ptypes, ret), stmt.line)
+            ptypes.append(self.resolve_ann(p.type_ann, scope, stmt))
+        ret = self.resolve_ann(stmt.return_type, scope, stmt) if stmt.return_type else UNKNOWN
+        self.tparams.pop()
+        for v in tvars:
+            if not any(v[1] in tvar_names(t) for t in ptypes):
+                self.error(f"type parameter '{v[1]}' of '{stmt.name}' is not used by any parameter, "
+                           f"so it can never be inferred", stmt,
+                           f"use {v[1]} in a parameter type, e.g. (x: {v[1]})")
+        self.declare(scope, stmt.name, self.make_func_type(tvars, ptypes, ret), stmt)
+
+    @staticmethod
+    def make_func_type(tvars, ptypes, ret):
+        return ("gfunc", tvars, ptypes, ret) if tvars else ("func", ptypes, ret)
+
+    def struct_ann(self, display, key, ann, scope, line):
+        want = self.struct_params.get(key, ())
+        args = tuple(self.resolve_ann(a, scope, line) for a in ann.params)
+        if len(args) != len(want):
+            if want:
+                self.error(f"'{display}' needs {len(want)} type argument(s): "
+                           f"{display}<{', '.join(want)}>", line)
+            else:
+                self.error(f"'{display}' is not generic, it takes no type arguments", line)
+            return UNKNOWN
+        return ("struct", key, args) if args else ("struct", key)
 
     def resolve_ann(self, ann, scope, line):
-        line = ann.line or line
+        line = ann if ann.line else line
         name = ann.name
         if "." in name:
             mod_name, _, member = name.partition(".")
             b = scope.lookup(mod_name)
             if b and isinstance(b.cur, tuple) and b.cur[0] == "module":
                 m = b.cur[2].get(member)
-                if isinstance(m, tuple) and m[0] == "structdef":
-                    base = ("struct", m[1])
+                if member in b.cur[3]:
+                    self.error(f"type '{member}' is not public in module '{mod_name}'", line)
+                    m = ("structdef", None)
+                    base = UNKNOWN
+                elif isinstance(m, tuple) and m[0] == "structdef":
+                    base = self.struct_ann(name, m[1], ann, scope, line)
                 else:
                     self.error(f"module '{mod_name}' has no type '{member}'", line)
                     base = UNKNOWN
@@ -313,12 +392,16 @@ class Checker:
             else:
                 base = ("map", self.resolve_ann(ann.params[0], scope, line),
                         self.resolve_ann(ann.params[1], scope, line))
+        elif any(name in frame for frame in self.tparams):
+            base = next(f[name] for f in reversed(self.tparams) if name in f)
+            if ann.params:
+                self.error(f"type parameter '{name}' does not take type arguments", line)
         elif name in _PRIMITIVES:
             if ann.params:
                 self.error(f"type '{name}' does not take type arguments", line)
             base = name
         elif name in self.types:
-            base = ("struct", self.types[name])
+            base = self.struct_ann(name, self.types[name], ann, scope, line)
         else:
             known = list(_PRIMITIVES) + ["list", "map"] + list(self.types)
             self.error(f"unknown type '{name}'", line, _suggest(name, known))
@@ -329,18 +412,24 @@ class Checker:
 
     def check_function(self, stmt, scope, update_binding):
         binding = scope.lookup(stmt.name)
-        ptypes = binding.cur[1] if binding and binding.cur[0] == "func" else [UNKNOWN] * len(stmt.params)
-        declared = None
-        if stmt.return_type is not None and binding:
-            declared = binding.cur[2]
+        tvars, ret_sig = (), UNKNOWN
+        if binding and isinstance(binding.cur, tuple) and binding.cur[0] == "gfunc":
+            tvars, ptypes, ret_sig = binding.cur[1], binding.cur[2], binding.cur[3]
+        elif binding and isinstance(binding.cur, tuple) and binding.cur[0] == "func":
+            ptypes, ret_sig = binding.cur[1], binding.cur[2]
+        else:
+            ptypes = [UNKNOWN] * len(stmt.params)
+        declared = ret_sig if stmt.return_type is not None else None
         fscope = Scope(scope)
+        self.tparams.append({v[1]: v for v in tvars})
         for p, t in zip(stmt.params, ptypes):
-            self.declare(fscope, p.name, t, stmt.line)
+            self.declare(fscope, p.name, t, stmt)
         frame = {"name": stmt.name, "loop": 0, "expected": declared, "returns": []}
         self.frames.append(frame)
         for s in stmt.body:
             self.check_stmt(s, fscope)
         self.frames.pop()
+        self.tparams.pop()
         falls = not block_terminates(stmt.body)
 
         if declared is not None:
@@ -348,13 +437,13 @@ class Checker:
             if falls and needs_value:
                 self.error(
                     f"'{stmt.name}' is declared to return {type_name(declared)}, "
-                    f"but some paths reach the end without returning a value", stmt.line,
+                    f"but some paths reach the end without returning a value", stmt,
                     "add a `return` at the end, or declare the return type as optional "
                     f"({type_name(declared)}?)")
         else:
             inferred = self.infer_return(stmt, frame["returns"], falls)
             if update_binding and binding:
-                binding.decl = binding.cur = ("func", binding.cur[1], inferred) + binding.cur[3:]
+                binding.decl = binding.cur = self.make_func_type(tvars, ptypes, inferred)
 
     def infer_return(self, stmt, returns, falls):
         types = [t for t, _ in returns]
@@ -372,7 +461,7 @@ class Checker:
         if len(known) > 1:
             names = " and ".join(type_name(k) for k in known)
             self.warn(f"'{stmt.name}' returns values of different types ({names}); "
-                      f"callers will get an unchecked 'any'", stmt.line,
+                      f"callers will get an unchecked 'any'", stmt,
                       "declare a return type, e.g. `-> int`, and return that type on every path")
             return ANY
         result = known[0]
@@ -397,25 +486,55 @@ class Checker:
         for s in block:
             self.check_stmt(s, scope)
 
+    def reject_nested_pub(self, stmt, scope):
+        if getattr(stmt, "public", False) and scope is not self.module_scope:
+            self.error("'pub' can only be used on top-level declarations", stmt)
+
+    def check_expr_as(self, node, scope, declared):
+        """Check `node` where a value of type `declared` is expected. A list/map literal written
+        where the author explicitly asked for `any` (`any`, `list<any>`, `map<K, any>`, or a parameter
+        of type any) may mix element types: heterogeneous data is exactly what `any` is for."""
+        base = strip_optional(declared)
+        if isinstance(node, A.ListLiteral) and (base == ANY or (isinstance(base, tuple) and base[0] == "list" and base[1] == ANY)):
+            for e in node.elements:
+                self.check_expr_as(e, scope, ANY)
+            return ("list", ANY)
+        if isinstance(node, A.MapLiteral) and (base == ANY or (isinstance(base, tuple) and base[0] == "map"
+                                                              and (base[1] == ANY or base[2] == ANY))):
+            key_any = base == ANY or base[1] == ANY
+            val_any = base == ANY or base[2] == ANY
+            kt, vt = [], []
+            for k, v in node.pairs:
+                kt.append(self.check_expr(k, scope))
+                vt.append(self.check_expr_as(v, scope, ANY) if val_any else self.check_expr(v, scope))
+            key = ANY if key_any else self.unify(kt, node, "map keys")
+            val = ANY if val_any else self.unify(vt, node, "map values")
+            return ("map", key, val)
+        return self.check_expr(node, scope)
+
     def check_LetStmt(self, stmt, scope):
-        vt = self.check_expr(stmt.value, scope)
+        self.reject_nested_pub(stmt, scope)
         if stmt.type_ann is not None:
-            declared = self.resolve_ann(stmt.type_ann, scope, stmt.line)
+            declared = self.resolve_ann(stmt.type_ann, scope, stmt)
+            vt = self.check_expr_as(stmt.value, scope, declared)
+        else:
+            vt = self.check_expr(stmt.value, scope)
+        if stmt.type_ann is not None:
             if not compatible(declared, vt):
                 self.error(f"'{stmt.name}' is declared as {type_name(declared)}, but the value "
-                           f"has type {type_name(vt)}", stmt.line, self.optional_hint(vt))
+                           f"has type {type_name(vt)}", stmt.value, self.value_hint(stmt.value, vt))
             t = declared
         else:
             t = vt
             if vt == NONE_T:
-                self.warn(f"'{stmt.name}' starts as none, so it can never hold another type", stmt.line,
+                self.warn(f"'{stmt.name}' starts as none, so it can never hold another type", stmt,
                           f"declare it as optional, e.g. `let {stmt.name}: int? = none`")
                 t = ANY
             elif contains_unknown(vt):
                 self.warn(f"cannot infer the element type of '{stmt.name}' from an empty collection",
-                          stmt.line, f"write the type, e.g. `let {stmt.name}: list<int> = []`")
+                          stmt, f"write the type, e.g. `let {stmt.name}: list<int> = []`")
                 t = self.unknown_to_any(vt)
-        self.declare(scope, stmt.name, t, stmt.line, "variable")
+        self.declare(scope, stmt.name, t, stmt, "variable")
 
     def unknown_to_any(self, t):
         if t == UNKNOWN:
@@ -428,6 +547,7 @@ class Checker:
         return t
 
     def check_FuncDecl(self, stmt, scope):
+        self.reject_nested_pub(stmt, scope)
         if id(stmt) not in self.predeclared:
             self.declare_func(stmt, scope)
             self.check_function(stmt, scope, update_binding=True)
@@ -435,6 +555,7 @@ class Checker:
             self.check_function(stmt, scope, update_binding=False)
 
     def check_StructDecl(self, stmt, scope):
+        self.reject_nested_pub(stmt, scope)
         if id(stmt) not in self.predeclared and not (stmt.name in self.registry and scope is self.module_scope):
             self.declare_struct(stmt, scope)
             self.resolve_pending_structs(scope)
@@ -448,7 +569,7 @@ class Checker:
         for cond, block in stmt.branches:
             cscope = Scope(scope)
             self.apply_narrowing(cscope, accumulated)
-            self.check_expr(cond, cscope)
+            self.require_bool(self.check_expr(cond, cscope), cond, "an 'if' condition")
             when_true, when_false = self.narrowings(cond, cscope)
             bscope = Scope(cscope)
             self.apply_narrowing(bscope, when_true)
@@ -500,7 +621,7 @@ class Checker:
 
     def check_WhileStmt(self, stmt, scope):
         cscope = Scope(scope)
-        self.check_expr(stmt.condition, cscope)
+        self.require_bool(self.check_expr(stmt.condition, cscope), stmt, "a 'while' condition")
         when_true, _ = self.narrowings(stmt.condition, cscope)
         bscope = Scope(cscope)
         self.apply_narrowing(bscope, when_true)
@@ -519,11 +640,11 @@ class Checker:
         elif it == "str":
             item = "str"
         else:
-            self.error(f"cannot loop over a value of type {type_name(it)}", stmt.line,
+            self.error(f"cannot loop over a value of type {type_name(it)}", stmt.iterable,
                        self.optional_hint(it) or "loops work on lists, maps, texts and range(...)")
             item = UNKNOWN
         bscope = Scope(scope)
-        self.declare(bscope, stmt.var_name, item, stmt.line)
+        self.declare(bscope, stmt.var_name, item, stmt)
         self.frames[-1]["loop"] += 1
         self.check_block(stmt.body, bscope)
         self.frames[-1]["loop"] -= 1
@@ -535,77 +656,108 @@ class Checker:
                 pt = self.check_expr(pattern, scope)
                 if not self.comparable(st, pt):
                     self.error(f"this case has type {type_name(pt)} and can never match a "
-                               f"{type_name(st)}", stmt.line)
+                               f"{type_name(st)}", stmt)
             self.check_block(block, Scope(scope))
 
     def check_TryStmt(self, stmt, scope):
         self.check_block(stmt.try_block, Scope(scope))
         cscope = Scope(scope)
-        self.declare(cscope, stmt.err_name, ("struct", _ERROR_KEY), stmt.line)
+        self.declare(cscope, stmt.err_name, ("struct", _ERROR_KEY), stmt)
         self.check_block(stmt.catch_block, cscope)
 
     def check_AssertStmt(self, stmt, scope):
-        self.check_expr(stmt.expr, scope)
+        self.require_bool(self.check_expr(stmt.expr, scope), stmt, "an 'assert' condition")
+        # execution only continues when the condition held, so it narrows the rest of the block
+        when_true, _ = self.narrowings(stmt.expr, scope)
+        self.apply_narrowing(scope, when_true)
         if stmt.message is not None:
             self.check_expr(stmt.message, scope)
 
     def check_ReturnStmt(self, stmt, scope):
-        vt = self.check_expr(stmt.value, scope) if stmt.value is not None else NONE_T
         frame = self.frames[-1]
+        if stmt.value is None:
+            vt = NONE_T
+        elif frame["expected"] is not None:
+            vt = self.check_expr_as(stmt.value, scope, frame["expected"])
+        else:
+            vt = self.check_expr(stmt.value, scope)
         if frame["name"] is None:
-            self.error("'return' can only be used inside a function", stmt.line)
+            self.error("'return' can only be used inside a function", stmt)
             return
-        frame["returns"].append((vt, stmt.line))
+        frame["returns"].append((vt, stmt))
         expected = frame["expected"]
         if expected is not None and not compatible(expected, vt):
             self.error(f"'{frame['name']}' is declared to return {type_name(expected)}, but this "
-                       f"'return' gives {type_name(vt)}", stmt.line, self.optional_hint(vt))
+                       f"'return' gives {type_name(vt)}", stmt.value if stmt.value is not None else stmt,
+                       self.value_hint(stmt.value, vt))
 
     def check_BreakStmt(self, stmt, scope):
         if self.frames[-1]["loop"] == 0:
-            self.error("'break' can only be used inside a loop", stmt.line)
+            self.error("'break' can only be used inside a loop", stmt)
 
     def check_ContinueStmt(self, stmt, scope):
         if self.frames[-1]["loop"] == 0:
-            self.error("'continue' can only be used inside a loop", stmt.line)
+            self.error("'continue' can only be used inside a loop", stmt)
 
     def check_UseStmt(self, stmt, scope):
-        name = stmt.alias or stmt.path.split(".")[-1]
-        t = self.load_module_type(stmt.path, stmt.line)
-        self.declare(scope, name, t, stmt.line)
+        t = self.load_module_type(stmt)
+        if stmt.names is None:
+            name = stmt.alias or stmt.default_name()
+            if not name.isidentifier():
+                self.error(f"cannot use '{name}' as a name for this import", stmt,
+                           f"give it one: use \"{stmt.path}\" as my_name")
+                name = "_import"
+            self.declare(scope, name, t, stmt)
+            return
+        for name, alias in stmt.names:               # use a, b as c from module
+            local = alias or name
+            if isinstance(t, tuple) and t[0] == "module":
+                mt = self.module_member(t, name, stmt)
+            else:
+                mt = UNKNOWN
+            if isinstance(mt, tuple) and mt[0] == "structdef":
+                if local in self.types and not self.repl:
+                    self.error(f"a struct named '{local}' already exists", stmt)
+                self.types[local] = mt[1]            # usable as a type name: `p: Point`
+            self.declare(scope, local, mt, stmt)
 
     def check_ExprStmt(self, stmt, scope):
         self.check_expr(stmt.expr, scope)
 
     # ----- modules
 
-    def load_module_type(self, path, line):
-        if path in STDLIB_SIGNATURES:
-            return ("module", path, dict(STDLIB_SIGNATURES[path]))
-        file_path = resolver.resolve(path, self.base_dir)
+    def load_module_type(self, stmt):
+        path, by_path = stmt.path, stmt.by_path
+        if not by_path and path in STDLIB_SIGNATURES:
+            return ("module", path, dict(STDLIB_SIGNATURES[path]), frozenset(), False)
+        file_path = resolver.resolve_import(path, self.base_dir, by_path)
         ctx = self.ctx
         if file_path is None:
-            self.error(f"cannot find module '{path}'", line,
-                       _suggest(path, list(STDLIB_SIGNATURES) + resolver.local_candidates(self.base_dir))
-                       or f"looked for {os.path.join(self.base_dir, *path.split('.'))}.cly "
-                          f"and for a dependency named '{path.split('.')[0]}' in calyre.toml")
+            shown = f'"{path}"' if by_path else f"'{path}'"
+            hint = None if by_path else _suggest(
+                path, list(STDLIB_SIGNATURES) + resolver.local_candidates(self.base_dir))
+            self.error(f"cannot find module {shown}", stmt,
+                       hint or resolver.describe_lookup(path, self.base_dir, by_path))
             return UNKNOWN
         if file_path in ctx.stack:
             chain = " -> ".join(os.path.basename(p) for p in ctx.stack + [file_path])
-            self.error(f"circular import: {chain}", line)
+            self.error(f"circular import: {chain}", stmt)
             return UNKNOWN
+        preferred = stmt.default_name() if by_path else path
+        prefix = ctx.prefix_for(file_path, preferred)
         info = ctx.cache.get(file_path)
         if info is None:
-            info = self.analyze_module(path, file_path)
+            info = self.analyze_module(prefix, file_path)
             ctx.cache[file_path] = info
         if info.errors:
             shown = "\n".join(f"      {os.path.basename(file_path)}:{d.line}: {d.message}" for d in info.errors[:3])
             more = f"\n      ... and {len(info.errors) - 3} more" if len(info.errors) > 3 else ""
-            self.error(f"module '{path}' has {len(info.errors)} error(s):\n{shown}{more}", line,
+            self.error(f"module '{preferred}' has {len(info.errors)} error(s):\n{shown}{more}", stmt,
                        f"run `calyre check {os.path.basename(file_path)}` to see all of them")
             return UNKNOWN
         self.registry.update(info.registry)
-        return ("module", path, info.members)
+        self.struct_params.update(info.struct_params)
+        return ("module", prefix, info.members, info.hidden, info.explicit)
 
     def analyze_module(self, path, file_path):
         try:
@@ -628,18 +780,35 @@ class Checker:
                 continue
             new_key = key if "." in key else f"{path}.{key}"
             registry[new_key] = {n: _requalify(t, path, local_keys) for n, t in fields.items()}
-        members = {}
-        for name, b in sub.module_scope.vars.items():
-            if name.startswith("_") or b.narrowed:
-                continue
-            members[name] = _requalify(b.cur, path, local_keys)
-        return ModuleInfo(members, registry, errors)
+        defined = {n for n, b in sub.module_scope.vars.items() if not b.narrowed}
+        exported, explicit = exported_names(program, defined)
+        members = {n: _requalify(sub.module_scope.vars[n].cur, path, local_keys) for n in exported}
+        sparams = {(k if "." in k else f"{path}.{k}"): v for k, v in sub.struct_params.items()
+                   if k != _ERROR_KEY}
+        return ModuleInfo(members, registry, errors, frozenset(defined - exported), explicit, sparams)
 
     # ----- expressions
 
     def check_expr(self, node, scope):
         m = getattr(self, f"expr_{type(node).__name__}", None)
         return UNKNOWN if m is None else m(node, scope)
+
+    def require_bool(self, t, line, what):
+        if is_permissive(t) or t == "bool":
+            return
+        self.error(f"{what} must be a bool, but this is {type_name(t)}", line,
+                   "Calyre has no implicit truthiness: write a comparison such as "
+                   "`x != 0`, `len(xs) > 0`, `s != \"\"` or `x != none`")
+
+    def value_hint(self, node, t):
+        """Hint for a type mismatch: optional values, or the int-division surprise."""
+        h = self.optional_hint(t)
+        if h:
+            return h
+        if isinstance(node, A.BinaryOp) and node.op == "/" and t == "float":
+            return ("`/` always gives a float; for integer division use math.floor_div(a, b), "
+                    "or convert with int(a / b)")
+        return None
 
     def optional_hint(self, t):
         if is_optional(t):
@@ -697,34 +866,35 @@ class Checker:
 
     def expr_ListLiteral(self, node, scope):
         types = [self.check_expr(e, scope) for e in node.elements]
-        return ("list", UNKNOWN if not types else self.unify(types, node.line, "list elements"))
+        return ("list", UNKNOWN if not types else self.unify(types, node, "list elements"))
 
     def expr_MapLiteral(self, node, scope):
         keys, vals = [], []
         for k, v in node.pairs:
             kt = self.check_expr(k, scope)
             if isinstance(kt, tuple) and kt[0] in ("list", "map"):
-                self.error("map keys must be simple values (int, str, bool, float)", node.line)
+                self.error("map keys must be simple values (int, str, bool, float)", node)
             keys.append(kt)
             vals.append(self.check_expr(v, scope))
         if not keys:
             return ("map", UNKNOWN, UNKNOWN)
-        return ("map", self.unify(keys, node.line, "map keys"), self.unify(vals, node.line, "map values"))
+        return ("map", self.unify(keys, node, "map keys"), self.unify(vals, node, "map values"))
 
     def expr_Identifier(self, node, scope):
         b = scope.lookup(node.name)
         if b is None:
-            self.error(f"'{node.name}' is not defined", node.line, _suggest(node.name, scope.names()))
+            self.error(f"'{node.name}' is not defined", node, _suggest(node.name, scope.names()))
             return UNKNOWN
         return b.cur
 
     def expr_UnaryOp(self, node, scope):
         t = self.check_expr(node.operand, scope)
         if node.op == "not":
+            self.require_bool(t, node, "the operand of 'not'")
             return "bool"
         if is_permissive(t) or is_numeric(t):
             return t
-        self.error(f"'-' expects a number, got {type_name(t)}", node.line, self.optional_hint(t))
+        self.error(f"'-' expects a number, got {type_name(t)}", node, self.optional_hint(t))
         return UNKNOWN
 
     def expr_BinaryOp(self, node, scope):
@@ -735,7 +905,8 @@ class Checker:
             when_true, when_false = self.narrowings(node.left, scope)
             rscope = Scope(scope)
             self.apply_narrowing(rscope, when_true if op == "and" else when_false)
-            self.check_expr(node.right, rscope)
+            self.require_bool(lt, node, f"the left side of '{op}'")
+            self.require_bool(self.check_expr(node.right, rscope), node, f"the right side of '{op}'")
             return "bool"
         rt = self.check_expr(node.right, scope)
         if op == "??":
@@ -743,7 +914,7 @@ class Checker:
         if op in ("==", "!="):
             if not self.comparable(lt, rt):
                 self.warn(f"comparing {type_name(lt)} with {type_name(rt)} is always "
-                          f"{'false' if op == '==' else 'true'}", node.line)
+                          f"{'false' if op == '==' else 'true'}", node)
             return "bool"
 
         if is_permissive(lt) or is_permissive(rt):
@@ -761,20 +932,20 @@ class Checker:
             if isinstance(lt, tuple) and lt[0] == "list" and isinstance(rt, tuple) and rt[0] == "list":
                 if compatible(lt, rt) or compatible(rt, lt):
                     return lt if not contains_unknown(lt) else rt
-                self.error(f"cannot join {type_name(lt)} with {type_name(rt)}", node.line)
+                self.error(f"cannot join {type_name(lt)} with {type_name(rt)}", node)
                 return UNKNOWN
             if "str" in (lt, rt) and (is_numeric(lt) or is_numeric(rt) or lt == "bool" or rt == "bool"):
-                self.error(f"'+' cannot join {type_name(lt)} with {type_name(rt)}", node.line,
+                self.error(f"'+' cannot join {type_name(lt)} with {type_name(rt)}", node,
                            "convert with str(value), or use interpolation: \"text {value}\"")
                 return UNKNOWN
         if op in ("+", "-", "*", "/", "%", "<", ">", "<=", ">="):
             if not (is_numeric(lt) and is_numeric(rt)):
                 self.error(f"'{op}' cannot be used between {type_name(lt)} and {type_name(rt)}",
-                           node.line, self.optional_hint(lt) or self.optional_hint(rt))
+                           node, self.optional_hint(lt) or self.optional_hint(rt))
                 return UNKNOWN
             if lt != rt:
                 self.error(f"Calyre never mixes int and float automatically: left is {type_name(lt)}, "
-                           f"right is {type_name(rt)}", node.line,
+                           f"right is {type_name(rt)}", node,
                            "convert one side explicitly: float(x) or int(x)")
                 return UNKNOWN
             if op in ("<", ">", "<=", ">="):
@@ -788,7 +959,7 @@ class Checker:
         if lt == NONE_T:
             return rt
         if not is_optional(lt):
-            self.warn(f"the left side of '??' is {type_name(lt)}, which is never none", node.line,
+            self.warn(f"the left side of '??' is {type_name(lt)}, which is never none", node,
                       "the fallback will never be used")
             return lt
         inner = lt[1]
@@ -800,19 +971,24 @@ class Checker:
         elif compatible(inner, rt):
             return inner
         self.error(f"the fallback of '??' has type {type_name(rt)}, but the value is {type_name(lt)}",
-                   node.line, f"use a fallback of type {type_name(inner)}")
+                   node, f"use a fallback of type {type_name(inner)}")
         return inner
 
     def expr_Call(self, node, scope):
         ct = self.check_expr(node.callee, scope)
-        arg_types = [(a.name, self.check_expr(a.value, scope)) for a in node.args]
+        expected = self.expected_params(ct)
+        arg_types = []
+        for i, a in enumerate(node.args):
+            want = expected.get(a.name if a.name is not None else i)
+            arg_types.append((a.name, self.check_expr_as(a.value, scope, want) if want is not None
+                              else self.check_expr(a.value, scope)))
         name = node.callee.name if isinstance(node.callee, A.Identifier) else (
             node.callee.name if isinstance(node.callee, A.Get) else "function")
 
         if is_permissive(ct):
             return ct
         if not isinstance(ct, tuple):
-            self.error(f"cannot call a value of type {type_name(ct)}", node.line)
+            self.error(f"cannot call a value of type {type_name(ct)}", node)
             return UNKNOWN
         if ct[0] == "structdef":
             return self.construct(node, ct[1], arg_types)
@@ -820,92 +996,260 @@ class Checker:
             return self.call_builtin(node, ct[1], arg_types)
         if ct[0] == "func":
             return self.call_func(node, name, ct, arg_types)
-        self.error(f"cannot call a value of type {type_name(ct)}", node.line)
+        if ct[0] == "gfunc":
+            return self.call_generic(node, name, ct, arg_types)
+        self.error(f"cannot call a value of type {type_name(ct)}", node)
         return UNKNOWN
+
+    def expected_params(self, ct):
+        """{position or field name: expected type} for the arguments of a call (for contextual typing)."""
+        if not isinstance(ct, tuple):
+            return {}
+        if ct[0] == "func":
+            return dict(enumerate(ct[1]))
+        if ct[0] == "gfunc":
+            return dict(enumerate(ct[2]))
+        if ct[0] == "builtin":
+            params = BUILTIN_SPECS[ct[1]][2]
+            return dict(enumerate(params)) if params else {}
+        if ct[0] == "structdef":
+            return {k: v for k, v in self.registry.get(ct[1], {}).items() if not has_tvars(v)}
+        return {}
+
+    # ----- generics: inference by unification of parameter and argument types
+
+    def bind_all(self, t, to, bindings):
+        """An argument of permissive type (any/unknown) binds every free variable in `t` to it."""
+        for n in tvar_names(t):
+            bindings.setdefault(n, to)
+
+    def unify_arg(self, param, arg, bindings):
+        """Match an argument type against a parameter type that may mention type variables,
+        recording what each variable stands for. Returns False on a mismatch."""
+        if not has_tvars(param):
+            return compatible(param, arg)
+        if is_permissive(arg):
+            self.bind_all(param, arg, bindings)
+            return True
+        k = param[0]
+        if k == "tvar":
+            name = param[1]
+            if name not in bindings:
+                bindings[name] = arg
+                return True
+            cur = bindings[name]
+            if is_permissive(cur):
+                return True
+            if self.same(cur, arg):
+                if contains_unknown(cur) and not contains_unknown(arg):
+                    bindings[name] = arg
+                return True
+            return False
+        if k == "optional":
+            if arg == NONE_T:
+                return True
+            return self.unify_arg(param[1], arg[1] if is_optional(arg) else arg, bindings)
+        if is_optional(arg) or arg == NONE_T:
+            return False
+        if k == "list":
+            return isinstance(arg, tuple) and arg[0] == "list" and self.unify_arg(param[1], arg[1], bindings)
+        if k == "map":
+            return (isinstance(arg, tuple) and arg[0] == "map"
+                    and self.unify_arg(param[1], arg[1], bindings)
+                    and self.unify_arg(param[2], arg[2], bindings))
+        if k == "struct":
+            if not (isinstance(arg, tuple) and arg[0] == "struct" and arg[1] == param[1]):
+                return False
+            pa, aa = param[2], (arg[2] if len(arg) > 2 else ())
+            return len(pa) == len(aa) and all(self.unify_arg(x, y, bindings) for x, y in zip(pa, aa))
+        return False
+
+    def call_generic(self, node, name, gt, arg_types):
+        _, tvars, params, ret = gt
+        if any(n is not None for n, _ in arg_types):
+            self.error(f"'{name}' does not take named arguments", node,
+                       "named arguments are only used to build structs")
+            return subst(ret, {})
+        if len(arg_types) != len(params):
+            self.error(f"'{name}' expects {len(params)} argument(s), got {len(arg_types)}", node)
+            return subst(ret, {})
+        bindings = {}
+        poisoned = any(a == UNKNOWN for _, a in arg_types)   # an argument already had an error
+        for i, (param, (_, actual)) in enumerate(zip(params, arg_types), 1):
+            if not self.unify_arg(param, actual, bindings):
+                poisoned = True
+                known = all(n in bindings for n in tvar_names(param))
+                shown = subst(param, bindings) if known else param
+                self.error(f"argument {i} of '{name}' expects {type_name(shown)}, got {type_name(actual)}",
+                           node.args[i - 1].value, self.optional_hint(actual))
+                for n in tvar_names(param):
+                    bindings.setdefault(n, UNKNOWN)
+        used_in_ret = tvar_names(ret)
+        for v in tvars:
+            n, bound, got = v[1], (v[2] if len(v) > 2 else None), bindings.get(v[1])
+            if bound is not None and got is not None and not compatible(bound, got):
+                self.error(f"'{name}' needs {type_name(bound)} here, got {type_name(got)}", node)
+                bindings[n] = UNKNOWN
+            elif got is None or contains_unknown(got):
+                if n in used_in_ret and not poisoned:
+                    self.error(f"cannot infer the type parameter {n} of '{name}'", node,
+                               "give an argument with a concrete type "
+                               "(an empty list `[]` carries no element type)")
+                bindings[n] = UNKNOWN
+        return subst(ret, bindings)
 
     def call_func(self, node, name, ft, arg_types):
         params, ret = ft[1], ft[2]
         variadic = len(ft) > 3 and ft[3]
         if any(n is not None for n, _ in arg_types):
-            self.error(f"'{name}' does not take named arguments", node.line,
+            self.error(f"'{name}' does not take named arguments", node,
                        "named arguments are only used to build structs")
             return ret
         n = len(arg_types)
-        if n < len(params) or (n > len(params) and not variadic):
-            self.error(f"'{name}' expects {len(params)} argument(s), got {n}", node.line)
+        lo = ft[4] if len(ft) > 4 else len(params)
+        if n < lo or (n > len(params) and not variadic):
+            want = f"{len(params)}" if lo == len(params) else f"{lo} to {len(params)}"
+            self.error(f"'{name}' expects {want} argument(s), got {n}", node)
             return ret
         for i, (expected, (_, actual)) in enumerate(zip(params, arg_types), 1):
             if not compatible(expected, actual):
                 self.error(f"argument {i} of '{name}' expects {type_name(expected)}, "
-                           f"got {type_name(actual)}", node.line, self.optional_hint(actual))
+                           f"got {type_name(actual)}", node.args[i - 1].value, self.optional_hint(actual))
         return ret
 
     def call_builtin(self, node, name, arg_types):
         lo, hi, params, ret = BUILTIN_SPECS[name]
         n = len(arg_types)
         if any(nm is not None for nm, _ in arg_types):
-            self.error(f"'{name}' does not take named arguments", node.line)
+            self.error(f"'{name}' does not take named arguments", node)
         elif n < lo or (hi is not None and n > hi):
             want = f"{lo}" if lo == hi else f"{lo} to {hi if hi is not None else 'any number of'}"
-            self.error(f"'{name}' expects {want} argument(s), got {n}", node.line)
+            self.error(f"'{name}' expects {want} argument(s), got {n}", node)
         elif params:
             for i, (expected, (_, actual)) in enumerate(zip(params, arg_types), 1):
                 if not compatible(expected, actual):
                     self.error(f"argument {i} of '{name}' expects {type_name(expected)}, "
-                               f"got {type_name(actual)}", node.line, self.optional_hint(actual))
+                               f"got {type_name(actual)}", node.args[i - 1].value, self.optional_hint(actual))
         if name == "len" and len(arg_types) == 1:
             t = arg_types[0][1]
             if not is_permissive(t) and not (t == "str" or (isinstance(t, tuple) and t[0] in ("list", "map"))):
-                self.error(f"'len' works on texts, lists and maps, not {type_name(t)}", node.line,
+                self.error(f"'len' works on texts, lists and maps, not {type_name(t)}", node,
                            self.optional_hint(t))
         return ret
 
     def construct(self, node, key, arg_types):
+        if key in NATIVE_METHODS:
+            self.error(f"'{type_name(('struct', key))}' cannot be built directly", node,
+                       "it comes from a function, e.g. sql.open(\"sqlite:app.db\")")
+            return ("struct", key)
         fields = self.registry.get(key, {})
+        params = self.struct_params.get(key, ())
         display = type_name(("struct", key))
-        seen = set()
+        seen, bindings = set(), {}
         for (nm, actual) in arg_types:
             if nm is None:
                 self.error(f"building a '{display}' needs named arguments, e.g. "
-                           f"{display.split('.')[-1]}(field: value)", node.line)
+                           f"{display.split('.')[-1]}(field: value)", node)
             elif nm not in fields:
-                self.error(f"'{display}' has no field '{nm}'", node.line, _suggest(nm, fields))
+                self.error(f"'{display}' has no field '{nm}'", node, _suggest(nm, fields))
             elif nm in seen:
-                self.error(f"field '{nm}' is given twice", node.line)
+                self.error(f"field '{nm}' is given twice", node)
             else:
                 seen.add(nm)
-                if not compatible(fields[nm], actual):
-                    self.error(f"field '{nm}' of '{display}' expects {type_name(fields[nm])}, got "
-                               f"{type_name(actual)}", node.line, self.optional_hint(actual))
+                if not self.unify_arg(fields[nm], actual, bindings):
+                    shown = subst(fields[nm], bindings) if all(n in bindings for n in tvar_names(fields[nm])) else fields[nm]
+                    self.error(f"field '{nm}' of '{display}' expects {type_name(shown)}, got "
+                               f"{type_name(actual)}", node, self.optional_hint(actual))
         missing = [f for f in fields if f not in seen]
         if missing and all(nm is not None for nm, _ in arg_types):
-            self.error(f"missing field(s) when building '{display}': {', '.join(missing)}", node.line)
-        return ("struct", key)
+            self.error(f"missing field(s) when building '{display}': {', '.join(missing)}", node)
+        if not params:
+            return ("struct", key)
+        args = []
+        for pname in params:
+            got = bindings.get(pname, UNKNOWN)
+            if contains_unknown(got) and not missing and not any(a == UNKNOWN for _, a in arg_types):
+                self.error(f"cannot infer the type parameter {pname} of '{display}'", node,
+                           "give the field a value with a concrete type")
+            args.append(got)
+        return ("struct", key, tuple(args))
+
+    def field_type(self, struct_t, name):
+        """Type of field `name` of a (possibly generic) struct instance, or None."""
+        fields = self.registry.get(struct_t[1], {})
+        if name not in fields:
+            return None
+        params = self.struct_params.get(struct_t[1], ())
+        if not params:
+            return fields[name]
+        args = struct_t[2] if len(struct_t) > 2 else ()
+        return subst(fields[name], dict(zip(params, args)))
 
     def expr_Get(self, node, scope):
         ot = self.check_expr(node.obj, scope)
         if is_permissive(ot):
             return ot
+        if isinstance(ot, tuple) and ot[0] == "struct" and ot[1] in NATIVE_METHODS:
+            return self.method_type(ot, node.name, node)
         if isinstance(ot, tuple) and ot[0] == "struct":
-            fields = self.registry.get(ot[1], {})
-            if node.name in fields:
-                return fields[node.name]
-            self.error(f"'{type_name(ot)}' has no field '{node.name}'", node.line, _suggest(node.name, fields))
+            ft = self.field_type(ot, node.name)
+            if ft is not None:
+                return ft
+            self.error(f"'{type_name(ot)}' has no field '{node.name}'", node,
+                       _suggest(node.name, self.registry.get(ot[1], {})))
             return UNKNOWN
         if isinstance(ot, tuple) and ot[0] == "module":
-            members = ot[2]
-            if node.name.startswith("_"):
-                self.error(f"'{node.name}' is private to module '{ot[1]}'", node.line,
-                           "names starting with '_' are not exported")
-                return UNKNOWN
-            if node.name not in members:
-                self.error(f"module '{ot[1]}' has no member '{node.name}'", node.line,
-                           _suggest(node.name, [m for m in members if not m.startswith("_")]))
-                return UNKNOWN
-            return members[node.name]
-        self.error(f"'.{node.name}' cannot be used on a value of type {type_name(ot)}", node.line,
+            return self.module_member(ot, node.name, node)
+        method = self.method_type(ot, node.name, node)
+        if method is not None:
+            return method
+        self.error(f"'.{node.name}' cannot be used on a value of type {type_name(ot)}", node,
                    self.optional_hint(ot))
         return UNKNOWN
+
+    def method_type(self, ot, name, line):
+        """Type of `value.name` for a list / map / str receiver (None if not such a receiver)."""
+        if ot == "str":
+            kind, mapping = "str", {}
+        elif isinstance(ot, tuple) and ot[0] == "list":
+            kind, mapping = "list", {"E": ot[1]}
+        elif isinstance(ot, tuple) and ot[0] == "map":
+            kind, mapping = "map", {"K": ot[1], "V": ot[2]}
+        elif isinstance(ot, tuple) and ot[0] == "struct" and ot[1] in NATIVE_METHODS:
+            kind, mapping = ot[1], {}
+        else:
+            return None
+        table = NATIVE_METHODS[kind] if kind in NATIVE_METHODS else METHODS[kind]
+        if name not in table:
+            self.error(f"{type_name(ot)} has no method '{name}'", line, _suggest(name, table))
+            return UNKNOWN
+        entry = table[name]
+        params, ret = entry[0], entry[1]
+        min_args = entry[3] if len(entry) > 3 else len(params)
+        if kind == "list" and name == "sort":
+            elem = ot[1]
+            if not is_permissive(elem) and elem not in SORTABLE:
+                self.error(f"cannot sort a {type_name(ot)}: only int, float and str can be ordered", line)
+        sig = [subst(p, mapping) for p in params]
+        if min_args < len(params):                 # optional trailing parameters
+            return ("func", sig, subst(ret, mapping), False, min_args)
+        return ("func", sig, subst(ret, mapping))
+
+    def module_member(self, mod, name, line):
+        """Type of `mod.name`, reporting private / missing members."""
+        _, mname, members, hidden, explicit = mod
+        if name in hidden:
+            if explicit:
+                self.error(f"'{name}' is not public in module '{mname}'", line,
+                           f"declare it with `pub` inside {mname}.cly to export it")
+            else:
+                self.error(f"'{name}' is private to module '{mname}'", line,
+                           "names starting with '_' are not exported")
+            return UNKNOWN
+        if name not in members:
+            self.error(f"module '{mname}' has no member '{name}'", line, _suggest(name, members))
+            return UNKNOWN
+        return members[name]
 
     def expr_Index(self, node, scope):
         ot = self.check_expr(node.obj, scope)
@@ -914,29 +1258,30 @@ class Checker:
             return ot
         if isinstance(ot, tuple) and ot[0] == "list" or ot == "str":
             if not compatible("int", it):
-                self.error(f"an index must be an int, got {type_name(it)}", node.line)
+                self.error(f"an index must be an int, got {type_name(it)}", node)
             return "str" if ot == "str" else ot[1]
         if isinstance(ot, tuple) and ot[0] == "map":
             if not compatible(ot[1], it):
-                self.error(f"this map has {type_name(ot[1])} keys, but the key is {type_name(it)}", node.line)
+                self.error(f"this map has {type_name(ot[1])} keys, but the key is {type_name(it)}", node)
             return ot[2]
-        self.error(f"a value of type {type_name(ot)} cannot be indexed", node.line, self.optional_hint(ot))
+        self.error(f"a value of type {type_name(ot)} cannot be indexed", node, self.optional_hint(ot))
         return UNKNOWN
 
     def expr_Assign(self, node, scope):
-        vt = self.check_expr(node.value, scope)
         target = node.target
+        known = scope.lookup(target.name) if isinstance(target, A.Identifier) else None
+        vt = self.check_expr_as(node.value, scope, known.decl) if known is not None else self.check_expr(node.value, scope)
         if isinstance(target, A.Identifier):
             b = scope.lookup(target.name)
             if b is None:
-                self.error(f"cannot assign to '{target.name}' before declaring it", node.line,
+                self.error(f"cannot assign to '{target.name}' before declaring it", node,
                            f"declare it first: let {target.name} = ...")
-            elif isinstance(b.decl, tuple) and b.decl[0] in ("func", "structdef", "module", "builtin"):
-                self.error(f"'{target.name}' is a {type_name(b.decl).split()[0]}, not a variable", node.line)
+            elif isinstance(b.decl, tuple) and b.decl[0] in ("func", "gfunc", "structdef", "module", "builtin"):
+                self.error(f"'{target.name}' is a {type_name(b.decl).split()[0]}, not a variable", node)
             else:
                 if not compatible(b.decl, vt):
                     self.error(f"cannot assign {type_name(vt)} to '{target.name}', which is "
-                               f"{type_name(b.decl)}", node.line, self.optional_hint(vt))
+                               f"{type_name(b.decl)}", node.value, self.value_hint(node.value, vt))
                 s = scope                     # a write invalidates `!= none` narrowing
                 while s is not None:
                     local = s.vars.get(target.name)
@@ -949,32 +1294,32 @@ class Checker:
         elif isinstance(target, A.Get):
             ot = self.check_expr(target.obj, scope)
             if isinstance(ot, tuple) and ot[0] == "struct":
-                fields = self.registry.get(ot[1], {})
-                if target.name not in fields:
-                    self.error(f"'{type_name(ot)}' has no field '{target.name}'", node.line,
-                               _suggest(target.name, fields))
-                elif not compatible(fields[target.name], vt):
-                    self.error(f"field '{target.name}' is {type_name(fields[target.name])}, cannot assign "
-                               f"{type_name(vt)}", node.line, self.optional_hint(vt))
+                ft = self.field_type(ot, target.name)
+                if ft is None:
+                    self.error(f"'{type_name(ot)}' has no field '{target.name}'", node,
+                               _suggest(target.name, self.registry.get(ot[1], {})))
+                elif not compatible(ft, vt):
+                    self.error(f"field '{target.name}' is {type_name(ft)}, cannot assign "
+                               f"{type_name(vt)}", node, self.optional_hint(vt))
             elif isinstance(ot, tuple) and ot[0] == "module":
-                self.error("module members cannot be reassigned from outside the module", node.line)
+                self.error("module members cannot be reassigned from outside the module", node)
             elif not is_permissive(ot):
-                self.error(f"'.{target.name}' cannot be assigned on a value of type {type_name(ot)}", node.line)
+                self.error(f"'.{target.name}' cannot be assigned on a value of type {type_name(ot)}", node)
         elif isinstance(target, A.Index):
             ot = self.check_expr(target.obj, scope)
             it = self.check_expr(target.index, scope)
             if isinstance(ot, tuple) and ot[0] == "list":
                 if not compatible("int", it):
-                    self.error(f"an index must be an int, got {type_name(it)}", node.line)
+                    self.error(f"an index must be an int, got {type_name(it)}", node)
                 if not compatible(ot[1], vt):
-                    self.error(f"this list holds {type_name(ot[1])}, cannot store {type_name(vt)}", node.line)
+                    self.error(f"this list holds {type_name(ot[1])}, cannot store {type_name(vt)}", node)
             elif isinstance(ot, tuple) and ot[0] == "map":
                 if not compatible(ot[1], it):
-                    self.error(f"this map has {type_name(ot[1])} keys, but the key is {type_name(it)}", node.line)
+                    self.error(f"this map has {type_name(ot[1])} keys, but the key is {type_name(it)}", node)
                 if not compatible(ot[2], vt):
-                    self.error(f"this map holds {type_name(ot[2])}, cannot store {type_name(vt)}", node.line)
+                    self.error(f"this map holds {type_name(ot[2])}, cannot store {type_name(vt)}", node)
             elif not is_permissive(ot):
-                self.error(f"a value of type {type_name(ot)} cannot be assigned by index", node.line)
+                self.error(f"a value of type {type_name(ot)} cannot be assigned by index", node)
         return vt
 
 

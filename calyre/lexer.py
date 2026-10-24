@@ -2,7 +2,7 @@
 Calyre lexer.
 
 Converts raw source text into a flat list of Token objects.
-No external dependencies, pure Python standard library.
+No external dependencies — pure Python standard library.
 """
 from dataclasses import dataclass
 
@@ -39,22 +39,44 @@ class LexError(Exception):
 
 
 @dataclass
+class Comment:
+    line: int
+    col: int
+    text: str            # the text after `//`, without the marker
+    own_line: bool       # True when nothing but whitespace precedes it on its line
+
+
+@dataclass
 class Token:
     type: str
     value: object
     line: int
+    col: int = 0         # 1-based column of the token's first character
+    raw: bool = False    # a """triple-quoted""" text: taken literally
+    end_line: int = 0    # last source line of a token that spans several lines (texts); 0 otherwise
 
     def __repr__(self):
         return f"Token({self.type}, {self.value!r}, line={self.line})"
 
 
-def tokenize(source: str):
+def tokenize(source: str, comments=None):
+    """Tokenize `source`. If `comments` is a list, every `// comment` is appended to it
+    (so tools such as the formatter never lose them); normal parsing ignores comments."""
+    import bisect
+    line_starts = [0] + [k + 1 for k, ch in enumerate(source) if ch == "\n"]
     tokens = []
+    marked = 0
+    tok_start = 0
     i = 0
     line = 1
     n = len(source)
 
     while i < n:
+        if len(tokens) > marked:         # a token was produced by the previous iteration
+            tk = tokens[-1]
+            tk.col = tok_start - line_starts[bisect.bisect_right(line_starts, tok_start) - 1] + 1
+            marked = len(tokens)
+        tok_start = i
         c = source[i]
 
         # whitespace (not newline)
@@ -70,8 +92,29 @@ def tokenize(source: str):
 
         # comments
         if c == "/" and i + 1 < n and source[i + 1] == "/":
+            start = i
             while i < n and source[i] != "\n":
                 i += 1
+            if comments is not None:
+                ls = line_starts[bisect.bisect_right(line_starts, start) - 1]
+                comments.append(Comment(line, start - ls + 1, source[start + 2:i].rstrip("\r"),
+                                        source[ls:start].strip() == ""))
+            continue
+
+        # """triple-quoted""" text: literal (no escapes, no {interpolation}); quotes and newlines allowed
+        if c == '"' and source.startswith('"""', i):
+            start_line = line
+            end = source.find('"""', i + 3)
+            if end < 0:
+                raise LexError('Unterminated """ text (it must end with another """)', start_line)
+            body = source[i + 3:end]
+            line += body.count("\n")
+            if body.startswith("\r\n"):
+                body = body[2:]
+            elif body.startswith("\n"):
+                body = body[1:]
+            i = end + 3
+            tokens.append(Token("STRING", body, start_line, 0, True, line))
             continue
 
         # strings (plain or interpolated, e.g. "Hello, {name}!")
@@ -123,9 +166,9 @@ def tokenize(source: str):
             i += 1  # closing quote
             parts.append(("str", "".join(buf)))
             if has_interp:
-                tokens.append(Token("TEMPLATE_STRING", parts, start_line))
+                tokens.append(Token("TEMPLATE_STRING", parts, start_line, 0, False, line))
             else:
-                tokens.append(Token("STRING", "".join(p[1] for p in parts), start_line))
+                tokens.append(Token("STRING", "".join(p[1] for p in parts), start_line, 0, False, line))
             continue
 
         # numbers
@@ -177,5 +220,7 @@ def tokenize(source: str):
 
         raise LexError(f"Unexpected character {c!r}", line)
 
-    tokens.append(Token("EOF", None, line))
+    if len(tokens) > marked:
+        tokens[-1].col = tok_start - line_starts[bisect.bisect_right(line_starts, tok_start) - 1] + 1
+    tokens.append(Token("EOF", None, line, 1))
     return tokens

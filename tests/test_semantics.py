@@ -266,3 +266,54 @@ class TestOperators(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestColumns(unittest.TestCase):
+    def pos(self, src):
+        d = analyze(src)[0][0]
+        return d.line, d.col
+
+    def test_mismatch_points_at_the_value(self):
+        self.assertEqual(self.pos('let x: int = "no"'), (1, 14))
+
+    def test_argument_error_points_at_the_argument(self):
+        self.assertEqual(self.pos('func f(a: int) -> int\n    return a\nend\nf("x")'), (4, 3))
+
+    def test_return_mismatch_points_at_the_returned_value(self):
+        self.assertEqual(self.pos('func f() -> int\n    return "x"\nend'), (2, 12))
+
+    def test_unknown_name_and_field_columns(self):
+        self.assertEqual(self.pos('let a = 1\nprint(b)'), (2, 7))
+        self.assertEqual(self.pos('struct P\n    x: int\nend\nlet p = P(x: 1)\nprint(p.y)'), (5, 9))
+
+    def test_binary_operator_error_starts_at_the_left_operand(self):
+        self.assertEqual(self.pos('let a = 1\nlet b = a + "x"'), (2, 9))
+
+    def test_columns_count_characters_after_multibyte_text(self):
+        self.assertEqual(self.pos('let s = "日本"\nlet q: int = s'), (2, 14))
+
+    def test_warning_has_position_too(self):
+        d = analyze('let xs = []')[1][0]
+        self.assertEqual((d.line, d.col), (1, 1))
+
+
+class TestAssertNarrowing(unittest.TestCase):
+    def test_assert_not_none_narrows_the_rest_of_the_block(self):
+        src = 'func f(x: int?) -> int\n    assert x != none\n    return x + 1\nend'
+        self.assertEqual(errors(src), [])
+
+    def test_assert_with_and_and_message(self):
+        src = 'func f(x: int?, y: str?) -> int\n    assert x != none and y != none, "both needed"\n    return x + len(y)\nend'
+        self.assertEqual(errors(src), [])
+
+    def test_assert_does_not_narrow_when_it_cannot_know(self):
+        self.assertTrue(errors('func f(x: int?) -> int\n    assert x == none\n    return x + 1\nend'))
+        self.assertTrue(errors('func f(x: int?, y: int?) -> int\n    assert x != none or y != none\n    return x + 1\nend'))
+
+    def test_narrowing_from_assert_stays_in_its_block(self):
+        src = 'func f(x: int?, ok: bool) -> int\n    if ok\n        assert x != none\n    end\n    return x + 1\nend'
+        self.assertTrue(errors(src))
+
+    def test_assert_narrowing_runs(self):
+        from tests.helpers import run
+        self.assertEqual(run('func f(x: int?) -> int\n    assert x != none\n    return x + 1\nend\nprint(f(4))').strip(), "5")

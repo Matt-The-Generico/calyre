@@ -8,10 +8,18 @@ cannot silently drift apart.
 
 `any` return types below are deliberate: they mark functions whose result type
 depends on their argument types (math.abs, math.min, random.choice, ...) and
-need generics, which are planned (see docs/ROADMAP.md, phase 3).
+need generics; `abs/min/max` and `random.choice` / `text.join` now use type variables.
+The only `any` left are the dynamic boundaries: `python.call` and `json.parse` / `json.stringify`.
 """
 
 from .types import ANY, NONE_T, NUMBER
+
+N = ("tvar", "N", NUMBER)       # a number: int or float, the same kind in and out
+T = ("tvar", "T")
+
+
+def G(tvars, params, ret):
+    return ("gfunc", tuple(tvars), list(params), ret)
 
 
 def F(params, ret, variadic=False):
@@ -24,10 +32,10 @@ STDLIB_SIGNATURES = {
         "floor": F([NUMBER], "int"),
         "ceil": F([NUMBER], "int"),
         "round": F([NUMBER], "int"),
-        "abs": F([NUMBER], ANY),
-        "pow": F([NUMBER, NUMBER], ANY),
-        "min": F([NUMBER, NUMBER], ANY),
-        "max": F([NUMBER, NUMBER], ANY),
+        "abs": G([N], [N], N),
+        "pow": F([NUMBER, NUMBER], "float"),
+        "min": G([N], [N, N], N),
+        "max": G([N], [N, N], N),
         "floor_div": F(["int", "int"], "int"),
         "pi": "float",
         "e": "float",
@@ -35,7 +43,7 @@ STDLIB_SIGNATURES = {
     "random": {
         "int": F(["int", "int"], "int"),
         "float": F([NUMBER, NUMBER], "float"),
-        "choice": F([("list", ANY)], ANY),
+        "choice": G([T], [("list", T)], T),
     },
     "time": {
         "now": F([], "float"),
@@ -46,7 +54,7 @@ STDLIB_SIGNATURES = {
         "lower": F(["str"], "str"),
         "trim": F(["str"], "str"),
         "split": F(["str", "str"], ("list", "str")),
-        "join": F([("list", ANY), "str"], "str"),
+        "join": G([T], [("list", T), "str"], "str"),
         "replace": F(["str", "str", "str"], "str"),
         "contains": F(["str", "str"], "bool"),
         "starts_with": F(["str", "str"], "bool"),
@@ -56,9 +64,47 @@ STDLIB_SIGNATURES = {
     "fs": {
         "read": F(["str"], "str"),
         "write": F(["str", "str"], NONE_T),
+        "append": F(["str", "str"], NONE_T),
         "exists": F(["str"], "bool"),
+        "is_file": F(["str"], "bool"),
+        "is_dir": F(["str"], "bool"),
         "list_dir": F(["str"], ("list", "str")),
         "make_dir": F(["str"], NONE_T),
+        "remove": F(["str"], NONE_T),
+        "remove_dir": F(["str"], NONE_T),
+        "size": F(["str"], "int"),
+        "rename": F(["str", "str"], NONE_T),
+    },
+    "path": {
+        "join": F(["str", "str"], "str"),
+        "join_all": F([("list", "str")], "str"),
+        "basename": F(["str"], "str"),
+        "dirname": F(["str"], "str"),
+        "stem": F(["str"], "str"),
+        "extension": F(["str"], "str"),
+        "with_extension": F(["str", "str"], "str"),
+        "normalize": F(["str"], "str"),
+        "parts": F(["str"], ("list", "str")),
+        "is_absolute": F(["str"], "bool"),
+        "relative_to": F(["str", "str"], "str"),
+        "absolute": F(["str"], "str"),
+    },
+    "json": {
+        "parse": F(["str"], ANY),          # JSON is dynamic data: a dynamic boundary on purpose
+        "stringify": F([ANY], "str"),
+        "pretty": F([ANY], "str"),
+    },
+    "sql": {
+        "open": F(["str"], ("struct", "sql.Database")),
+        "engines": F([], ("list", "str")),
+        "Database": ("structdef", "sql.Database"),
+    },
+    "system": {
+        "args": F([], ("list", "str")),
+        "env": F(["str"], ("optional", "str")),
+        "platform": F([], "str"),
+        "cwd": F([], "str"),
+        "exit": F(["int"], NONE_T),
     },
     "python": {
         "call": F(["str", "str"], ANY, variadic=True),

@@ -11,7 +11,10 @@ Local files win, so a project can always shadow a dependency deliberately.
 """
 
 import os
+import re
 import tomllib
+
+_WINDOWS_DRIVE = re.compile(r"^[A-Za-z]:/")
 
 
 def find_manifest(start_dir):
@@ -34,6 +37,46 @@ def load_dependencies(manifest_path):
         return {}
     deps = data.get("dependencies", {})
     return deps if isinstance(deps, dict) else {}
+
+
+def path_candidate(spec, base_dir):
+    """Where `use "spec"` points: `\\` counts as `/` on every platform, `.cly` is added when missing,
+    relative paths are relative to the importing file's folder (never the working directory)."""
+    p = spec.replace("\\", "/")
+    if not p.endswith(".cly"):
+        if "." in p.rsplit("/", 1)[-1] and not p.endswith("."):
+            raise ValueError(f"only .cly files can be imported, not '{spec}'")
+        p += ".cly"
+    if p.startswith("/") or _WINDOWS_DRIVE.match(p):
+        return os.path.normpath(p) if os.path.isabs(p) else p      # a drive path is only absolute on Windows
+    return os.path.normpath(os.path.join(base_dir, p))
+
+
+def resolve_import(spec, base_dir, by_path):
+    """Canonical (symlink-free) file for a `use`, or None. Name imports and path imports of the
+    same file yield the same string, so a module is loaded once however it is imported."""
+    if by_path:
+        try:
+            cand = path_candidate(spec, base_dir)
+        except ValueError:
+            return None
+        found = cand if os.path.isfile(cand) else None
+    else:
+        found = resolve(spec, base_dir)
+    return os.path.realpath(found) if found else None
+
+
+def describe_lookup(spec, base_dir, by_path):
+    """Human text for 'where did the resolver look' (used in error hints)."""
+    if by_path:
+        try:
+            return (f"looked for {path_candidate(spec, base_dir)} "
+                    f"(paths are relative to the file that contains the `use`, not to the current folder)")
+        except ValueError as e:
+            return str(e)
+    first = spec.split(".")[0]
+    return (f"looked for {os.path.join(base_dir, *spec.split('.'))}.cly and for a dependency "
+            f"named '{first}' in calyre.toml")
 
 
 def resolve(path, base_dir):
