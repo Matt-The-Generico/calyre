@@ -4,10 +4,10 @@
 
 | Artifact | How it is made | Verified |
 |----------|----------------|----------|
-| Source (Python 3.11+, no dependencies) | this repository | `python -m unittest discover -s tests` on Linux |
-| Linux x86_64 executable | `python scripts/build.py` on Linux | built and smoke-tested on Linux (see below) |
-| Windows executable | `python scripts/build.py` **on Windows** | **not built or tested yet** |
-| macOS executable | `python scripts/build.py` **on macOS** | **not built or tested yet** |
+| Source (Python 3.11+, no dependencies) | this repository | Tests pass on Linux, Windows, and macOS via GitHub Actions |
+| Linux x86_64 executable | `python scripts/build.py` on Linux | Built and smoke-tested on Linux via GitHub Actions |
+| Windows executable | `python scripts/build.py` on Windows | Built and smoke-tested on Windows via GitHub Actions |
+| macOS executable | `python scripts/build.py` on macOS | Built and smoke-tested on macOS via GitHub Actions |
 
 PyInstaller cannot cross-compile, so a Windows `.exe` or a macOS binary must be built on that system. `.github/workflows/ci.yml` runs
 the tests and the build on all three systems; it was written but **never executed** in the environment that produced it, so treat
