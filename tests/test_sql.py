@@ -148,7 +148,10 @@ class TestOpening(unittest.TestCase):
             f = os.path.join(d, "app.db").replace("\\", "/")
             run(f'use sql\nlet db = sql.open("sqlite:{f}")\ndb.execute("CREATE TABLE t (v INTEGER)")\ndb.begin()\n'
                 f'db.execute("INSERT INTO t VALUES (1)")\ndb.close()')
-            self.assertEqual(run(f'use sql\nlet db = sql.open("sqlite:{f}")\nprint(len(db.query("SELECT * FROM t")))').strip(), "0")
+            self.assertEqual(run(
+                f'use sql\nlet db = sql.open("sqlite:{f}")\n'
+                'print(len(db.query("SELECT * FROM t")))\ndb.close()'
+            ).strip(), "0")
 
     def test_unopenable_files_are_clear_errors(self):
         with project({"junk.db": "this is not a database file at all, just text\n" * 20}) as d:
