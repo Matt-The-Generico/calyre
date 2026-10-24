@@ -159,14 +159,16 @@ def open_database(url):
         raise _err(f"sql.open: unknown engine '{engine}' (available: {', '.join(ENGINES)})")
     if target == "":
         raise _err("sql.open: the URL needs a file name or ':memory:', e.g. \"sqlite:app.db\"")
+    conn = None
     try:
-        conn = sqlite3.connect(target, isolation_level=None)      # autocommit; transactions are explicit
+        conn = sqlite3.connect(target, isolation_level=None)
         conn.execute("PRAGMA foreign_keys = ON")
-        conn.execute("SELECT 1 FROM sqlite_master LIMIT 1")        # fails now (not later) on a bad/corrupt file
+        conn.execute("SELECT 1 FROM sqlite_master LIMIT 1")
     except sqlite3.Error as e:
+        if conn is not None:
+            conn.close()
         raise _err(f"sql.open: cannot open '{target}': {e}") from e
     return Database(url, conn)
-
 
 # (params, return type, implementation, minimum number of arguments)
 DATABASE_METHODS = {
