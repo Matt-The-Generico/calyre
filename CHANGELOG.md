@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased (proposed next version: 0.3.0, it contains breaking changes)
+## Version 0.3.0
 
 ### Added
 * **Generics** for functions and structs (`func first<T>(items: list<T>) -> T`, `struct Box<T>`), inferred at each call; generic standard library
