@@ -141,7 +141,7 @@ class TestOpening(unittest.TestCase):
             f = os.path.join(d, "app.db").replace("\\", "/")
             run(f'use sql\nlet db = sql.open("sqlite:{f}")\ndb.execute("CREATE TABLE t (v INTEGER)")\n'
                 f'db.execute("INSERT INTO t VALUES (?)", [42])\ndb.close()')
-            self.assertEqual(run(f'use sql\nlet db = sql.open("sqlite:{f}")\nprint((db.query_one("SELECT v FROM t") ?? {{}})["v"])').strip(), "42")
+            self.assertEqual(run(f'use sql\nlet db = sql.open("sqlite:{f}")\nprint((db.query_one("SELECT v FROM t") ?? {{}})["v"])\ndb.close()').strip(), "42")
 
     def test_uncommitted_work_is_lost_on_close(self):
         with project({}) as d:
