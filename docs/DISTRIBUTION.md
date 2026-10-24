@@ -9,9 +9,7 @@
 | Windows executable | `python scripts/build.py` on Windows | Built and smoke-tested on Windows via GitHub Actions |
 | macOS executable | `python scripts/build.py` on macOS | Built and smoke-tested on macOS via GitHub Actions |
 
-PyInstaller cannot cross-compile, so a Windows `.exe` or a macOS binary must be built on that system. `.github/workflows/ci.yml` runs
-the tests and the build on all three systems; it was written but **never executed** in the environment that produced it, so treat
-Windows and macOS support as unproven until it has run.
+The GitHub Actions CI workflow runs the full test suite, benchmarks, and executable build with smoke tests on Linux, Windows, and macOS. All three platforms have passed these checks. Because PyInstaller cannot cross-compile, each executable is built on its target operating system. These results verify the current CI environment; they do not guarantee compatibility with every OS version or hardware configuration.
 
 ## Building one executable
 
