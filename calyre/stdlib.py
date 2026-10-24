@@ -150,7 +150,12 @@ def _build_fs():
         if not isinstance(value, str):
             raise CalyreRuntimeError(f"fs.{op}: the content must be a text (use str(...) if needed)")
 
+
     def read(path):
+        if _os.path.isdir(path):
+            raise CalyreRuntimeError(
+                f"fs.read: '{path}': it is a folder, not a file"
+            )
         try:
             with open(path, "r", encoding="utf-8") as f:
                 return f.read()
